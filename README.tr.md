@@ -14,37 +14,108 @@ Bu lab'ın uzun vadeli hedefi virtualization ve Kubernetes. Buradaki hemen her b
 
 ## İçindekiler
 
-- [Bölüm 0 — Everything is a file](#bölüm-0--everything-is-a-file)
-- [Bölüm 1 — systemd & systemctl](#bölüm-1--systemd--systemctl)
-- [Bölüm 2 — Logging & journalctl](#bölüm-2--logging--journalctl)
-- [Bölüm 3 — Users & groups](#bölüm-3--users--groups)
-- [Bölüm 4 — Package management (apt)](#bölüm-4--package-management-apt)
-- [Bölüm 5 — Process management](#bölüm-5--process-management)
-- [Bölüm 6 — SSH & sshd](#bölüm-6--ssh--sshd)
-- [Bölüm 7 — Networking temelleri](#bölüm-7--networking-temelleri)
-- [Bölüm 8 — File permissions & ownership](#bölüm-8--file-permissions--ownership)
-- [Bölüm 9 — Disk & filesystem](#bölüm-9--disk--filesystem)
-- [Bölüm 10 — Cron & timers](#bölüm-10--cron--timers)
+- [Bölüm 0 — Linux dosya yapısı](#bölüm-0--linux-dosya-yapısı)
+- [Bölüm 1 — Everything is a file](#bölüm-1--everything-is-a-file)
+- [Bölüm 2 — systemd & systemctl](#bölüm-2--systemd--systemctl)
+- [Bölüm 3 — Logging & journalctl](#bölüm-3--logging--journalctl)
+- [Bölüm 4 — Users & groups](#bölüm-4--users--groups)
+- [Bölüm 5 — Package management (apt)](#bölüm-5--package-management-apt)
+- [Bölüm 6 — Process management](#bölüm-6--process-management)
+- [Bölüm 7 — SSH & sshd](#bölüm-7--ssh--sshd)
+- [Bölüm 8 — Networking temelleri](#bölüm-8--networking-temelleri)
+- [Bölüm 9 — File permissions & ownership](#bölüm-9--file-permissions--ownership)
+- [Bölüm 10 — Disk & filesystem](#bölüm-10--disk--filesystem)
+- [Bölüm 11 — Cron & timers](#bölüm-11--cron--timers)
 
 ## Müfredat
 
 | # | Bölüm | Cevapladığı soru | Durum |
 |---|-------|------------------|-------|
-| 0 | [Everything is a file](#bölüm-0--everything-is-a-file) | File nedir, file descriptor nedir, socket nedir — ve neden *her şey* bir file? | ⏳ |
-| 1 | [systemd & systemctl](#bölüm-1--systemd--systemctl) | systemd makinedeki her programı nasıl kontrol ediyor? | 🔜 |
-| 2 | [Logging & journalctl](#bölüm-2--logging--journalctl) | Log'lar nerede yaşıyor, journal nasıl sorgulanır? | 🔜 |
-| 3 | [Users & groups](#bölüm-3--users--groups) | User nasıl yaratılır, kısıtlanır, yok edilir — group gerçekte nedir? | ✅ |
-| 4 | [Package management (apt)](#bölüm-4--package-management-apt) | `apt install` deyince gerçekte ne oluyor — repo'lar, GPG key'ler, binary'ler? | 🔜 |
-| 5 | [Process management](#bölüm-5--process-management) | Process nedir, signal nedir — SIGTERM ile SIGKILL'i gerçekte ne ayırır? | 🔜 |
-| 6 | [SSH & sshd](#bölüm-6--ssh--sshd) | sshd nasıl kurulur ve hardening yapılır, key'ler nasıl yönetilir? | 🔜 |
-| 7 | [Networking temelleri](#bölüm-7--networking-temelleri) | Makine nasıl konuşuyor — interface'ler, DNS, firewall, namespace'ler? | 🔜 |
-| 8 | [File permissions & ownership](#bölüm-8--file-permissions--ownership) | Kim neye dokunabilir — chmod, umask, setuid, ACL? | 🔜 |
-| 9 | [Disk & filesystem](#bölüm-9--disk--filesystem) | Disk nasıl directory'ye dönüşüyor — mount, fstab, LVM? | 🔜 |
-| 10 | [Cron & timers](#bölüm-10--cron--timers) | Bir işi zamanlayarak nasıl koştururum — cron mu systemd timer mı? | 🔜 |
+| 0 | [Linux dosya yapısı](#bölüm-0--linux-dosya-yapısı) | Dizin ağacında ne nerede duruyor — /etc, /var, /usr, /bin ne için var? | ✅ |
+| 1 | [Everything is a file](#bölüm-1--everything-is-a-file) | File nedir, file descriptor nedir, socket nedir — ve neden *her şey* bir file? | ⏳ |
+| 2 | [systemd & systemctl](#bölüm-2--systemd--systemctl) | systemd makinedeki her programı nasıl kontrol ediyor? | 🔜 |
+| 3 | [Logging & journalctl](#bölüm-3--logging--journalctl) | Log'lar nerede yaşıyor, journal nasıl sorgulanır? | 🔜 |
+| 4 | [Users & groups](#bölüm-4--users--groups) | User nasıl yaratılır, kısıtlanır, yok edilir — group gerçekte nedir? | ✅ |
+| 5 | [Package management (apt)](#bölüm-5--package-management-apt) | `apt install` deyince gerçekte ne oluyor — repo'lar, GPG key'ler, binary'ler? | 🔜 |
+| 6 | [Process management](#bölüm-6--process-management) | Process nedir, signal nedir — SIGTERM ile SIGKILL'i gerçekte ne ayırır? | 🔜 |
+| 7 | [SSH & sshd](#bölüm-7--ssh--sshd) | sshd nasıl kurulur ve hardening yapılır, key'ler nasıl yönetilir? | 🔜 |
+| 8 | [Networking temelleri](#bölüm-8--networking-temelleri) | Makine nasıl konuşuyor — interface'ler, DNS, firewall, namespace'ler? | 🔜 |
+| 9 | [File permissions & ownership](#bölüm-9--file-permissions--ownership) | Kim neye dokunabilir — chmod, umask, setuid, ACL? | 🔜 |
+| 10 | [Disk & filesystem](#bölüm-10--disk--filesystem) | Disk nasıl directory'ye dönüşüyor — mount, fstab, LVM? | 🔜 |
+| 11 | [Cron & timers](#bölüm-11--cron--timers) | Bir işi zamanlayarak nasıl koştururum — cron mu systemd timer mı? | 🔜 |
 
 ---
 
-# Bölüm 0 — Everything is a file
+# Bölüm 0 — Linux dosya yapısı
+
+Makine: Ubuntu 24.04 (AWS). Bu bölüm lab pratiği değil, standart FHS (Filesystem Hierarchy Standard) referansı.
+
+## Cheat sheet
+
+| Dizin | Ne saklar | Kalıcı mı | Kim yazar |
+|-------|-----------|-----------|-----------|
+| `/etc` | sistem geneli config dosyaları (text) | kalıcı | root, paketler kurulumda |
+| `/var` | değişen veri: log, cache, spool, db | kalıcı | servisler, root |
+| `/usr` | kurulu programlar + kütüphaneler + paylaşılan data | kalıcı, apt'ın yönettiği alan | paket yöneticisi (apt) |
+| `/bin` | temel komutlar (`ls`, `cat`...) — Ubuntu'da `/usr/bin`'e symlink | kalıcı | paket yöneticisi |
+| `/home` | user'ların kişisel dosyaları | kalıcı | user'ın kendisi |
+| `/tmp` | kısa ömürlü geçici dosyalar | periyodik temizlenir (`systemd-tmpfiles`), dağıtıma göre tmpfs ya da disk | herkes (world-writable, sticky bit) |
+| `/opt` | apt dışı, kendi kendine yeten 3rd-party yazılım | kalıcı | manuel kurulum |
+| `/proc` | çalışan process'ler + kernel durumu — gerçek dosya değil, kernel'in canlı görünümü | RAM'de, disk'te yok | kernel |
+| `/sys` | kernel'in device/driver bilgisini export ettiği sanal fs | RAM'de, disk'te yok | kernel |
+| `/dev` | device node'ları (`/dev/sda`, `/dev/null`, `/dev/tty1`...) | RAM'de (devtmpfs), disk'te yok | kernel (udev) |
+| `/lib` | kernel modülleri + temel programların shared library'leri — Ubuntu'da `/usr/lib`'e symlink | kalıcı | paket yöneticisi |
+
+## 0.1 — `/bin` ve `/lib` neden symlink
+
+Ubuntu "usrmerge" yaptı: eskiden `/bin`, `/sbin`, `/lib` kök dizinde ayrı dururdu, çünkü early boot'ta `/usr` henüz mount edilmemiş olabiliyordu. Artık initramfs her şeyi erken mount ettiği için ayrım anlamsızlaştı; hepsi `/usr` altına taşındı, eski isimler geriye dönük uyumluluk için symlink olarak kaldı.
+
+```
+$ ls -la /
+lrwxrwxrwx ... bin -> usr/bin
+lrwxrwxrwx ... lib -> usr/lib
+lrwxrwxrwx ... sbin -> usr/sbin
+```
+
+| Yol | Gerçek yeri |
+|-----|-------------|
+| `/bin/ls` | `/usr/bin/ls` |
+| `/sbin/reboot` | `/usr/sbin/reboot` |
+| `/lib/systemd` | `/usr/lib/systemd` |
+
+## 0.2 — `/proc`, `/sys`, `/dev`: disk'te yoklar
+
+Üçü de **sanal** dosya sistemi. `df -h` çıktısında görünürler ama disk alanı kullanmazlar; reboot'ta sıfırdan kernel tarafından yaratılırlar.
+
+| Dizin | Ne gösterir | Örnek |
+|-------|-------------|-------|
+| `/proc/<pid>/` | o process'in durumu | `/proc/1/status`, `/proc/1/cmdline` |
+| `/proc/cpuinfo`, `/proc/meminfo` | kernel'in donanım/kaynak görünümü | `cat /proc/meminfo` |
+| `/sys/class/net/` | network interface'lerin kernel nesneleri | `/sys/class/net/eth0` |
+| `/dev/sda`, `/dev/null`, `/dev/tty1` | device node — bir dosyaya yazmak donanımla konuşmak demektir | `echo hi > /dev/null` |
+
+## 0.3 — `/tmp` vs `/var/tmp` vs `/opt`
+
+| Dizin | Ömür | Kullanım |
+|-------|------|----------|
+| `/tmp` | kısa — `systemd-tmpfiles` periyodik temizler | kısa ömürlü geçici dosya |
+| `/var/tmp` | `/tmp`'den daha uzun tutulur, her zaman disk üzerinde | uzun süren işlerin geçici dosyası |
+| `/opt` | kalıcı, apt'ın yönetmediği alan | tek-paket halinde gelen 3rd-party yazılım (`/opt/google/chrome` gibi) |
+
+## Notlar
+
+- `/etc` içindeki her şey neredeyse hep text config'tir, binary olmaz — bu bir kural değil ama yaygın kabul.
+- `/usr` altı apt'ın yönettiği alandır: apt install ettiğin her şey buraya düşer, elle dokunulmaz.
+- Servis hesaplarının home'u genelde `/nonexistent` ya da `/var/lib/<servis>` olur, `/home` altında değil (bkz. Bölüm 4).
+
+Levent'e sor:
+- Bu makinede `/tmp` gerçekten tmpfs (RAM) olarak mı mount edilmiş, yoksa disk üzerinde mi — `mount | grep /tmp` ile doğrulanmadı.
+
+[↑ İçindekilere dön](#i̇çindekiler)
+
+---
+
+# Bölüm 1 — Everything is a file
 
 > ⏳ Placeholder — file, inode, file descriptor, special file'lar (device, pipe, socket), `lsof`, `/proc/PID/fd`.
 
@@ -52,7 +123,7 @@ Bu lab'ın uzun vadeli hedefi virtualization ve Kubernetes. Buradaki hemen her b
 
 ---
 
-# Bölüm 1 — systemd & systemctl
+# Bölüm 2 — systemd & systemctl
 
 > 🔜 Placeholder — systemd programları nasıl kontrol eder: unit'ler, target'lar, service lifecycle, unit file yazmak.
 
@@ -60,7 +131,7 @@ Bu lab'ın uzun vadeli hedefi virtualization ve Kubernetes. Buradaki hemen her b
 
 ---
 
-# Bölüm 2 — Logging & journalctl
+# Bölüm 3 — Logging & journalctl
 
 > 🔜 Placeholder — journal, unit/zaman/priority ile filtreleme, rsyslog, log rotation.
 
@@ -68,7 +139,7 @@ Bu lab'ın uzun vadeli hedefi virtualization ve Kubernetes. Buradaki hemen her b
 
 ---
 
-# Bölüm 3 — Users & groups
+# Bölüm 4 — Users & groups
 
 Makine: Ubuntu 24.04 (AWS). Ana hesap `ubuntu`, test hesabı `deneme`, servis hesabı `myapp`.
 
@@ -78,27 +149,27 @@ Makine: Ubuntu 24.04 (AWS). Ana hesap `ubuntu`, test hesabı `deneme`, servis he
 |---|---|
 | `id [user]` | UID, primary GID, ek group'lar |
 | `id -gn user` | sadece primary group adı |
-| `sudo adduser X` | user + group + home + skel kopyası |
-| `sudo adduser --system --group --no-create-home X` | servis hesabı: UID<1000, nologin, home yok |
-| `sudo deluser X` / `--remove-home` | user sil / home'u da sil |
-| `sudo deluser --system X` | servis hesabı sil (flag yoksa reddeder) |
-| `sudo groupadd G` / `sudo groupdel G` | group yarat / sil |
-| `sudo usermod -aG G X` | ek group'a **ekle** (`-a` yoksa listeyi ezer) |
-| `sudo gpasswd -a X G` / `-d X G` | ek group'a ekle / çıkar |
-| `sudo usermod -g G X` | primary group değiştir (home'daki dosyaları da taşır) |
-| `sudo usermod -s SHELL X` | login shell değiştir (`/usr/sbin/nologin` = kapat) |
-| `sudo usermod -e YYYY-MM-DD X` / `-e ''` | hesabı tarihte expire et / kaldır |
-| `sudo passwd -l X` / `-u X` | şifreyi kilitle / aç |
-| `sudo chage -l X` / `-M 90 X` | süre bilgilerini listele / şifre ömrü 90 gün |
-| `newgrp G` | çıkıp girmeden group'u aktif et (iç shell açar) |
-| `su - X` / `su - X -c 'cmd'` | X ol / X olarak tek komut (X'in şifresi) |
-| `sudo -u X cmd` | X olarak tek komut (senin şifren, shell'i atlar) |
-| `sudo visudo -f /etc/sudoers.d/X` | sudoers kuralı yaz (syntax kontrollü) |
-| `sudo find / -uid N` / `-gid N 2>/dev/null` | öksüz dosyaları bul |
-| `sudo chgrp G dosya` | dosyanın group'unu değiştir |
+| `sudo adduser <user>` | user + group + home + skel kopyası |
+| `sudo adduser --system --group --no-create-home <user>` | servis hesabı: UID<1000, nologin, home yok |
+| `sudo deluser <user>` / `--remove-home` | user sil / home'u da sil |
+| `sudo deluser --system <user>` | servis hesabı sil (flag yoksa reddeder) |
+| `sudo groupadd <group>` / `sudo groupdel <group>` | group yarat / sil |
+| `sudo usermod -aG <group> <user>` | ek group'a **ekle** (`-a` yoksa listeyi ezer) |
+| `sudo gpasswd -a <user> <group>` / `-d <user> <group>` | ek group'a ekle / çıkar |
+| `sudo usermod -g <group> <user>` | primary group değiştir (home'daki dosyaları da taşır) |
+| `sudo usermod -s <shell> <user>` | login shell değiştir (`/usr/sbin/nologin` = kapat) |
+| `sudo usermod -e YYYY-MM-DD <user>` / `-e ''` | hesabı tarihte expire et / kaldır |
+| `sudo passwd -l <user>` / `-u <user>` | şifreyi kilitle / aç |
+| `sudo chage -l <user>` / `-M 90 <user>` | süre bilgilerini listele / şifre ömrü 90 gün |
+| `newgrp <group>` | çıkıp girmeden group'u aktif et (iç shell açar) |
+| `su - <user>` / `su - <user> -c 'cmd'` | `<user>` ol / `<user>` olarak tek komut (`<user>`'ın şifresi) |
+| `sudo -u <user> cmd` | `<user>` olarak tek komut (senin şifren, shell'i atlar) |
+| `sudo visudo -f /etc/sudoers.d/<user>` | sudoers kuralı yaz (syntax kontrollü) |
+| `sudo find / -uid <uid>` / `-gid <gid> 2>/dev/null` | öksüz dosyaları bul |
+| `sudo chgrp <group> dosya` | dosyanın group'unu değiştir |
 | `cut -d: -f1 /etc/passwd` | tüm user adları |
 
-## 3.1 — Kimlik
+## 4.1 — Kimlik
 
 ```
 $ id
@@ -120,7 +191,7 @@ uid=1000(ubuntu) gid=1000(ubuntu) groups=1000(ubuntu),4(adm),24(cdrom),27(sudo),
 
 User + group birlikte çalışır: owner'san user'ın, değilsen group üyeliğin belirler. Yönetim alışkanlığı group üzerinden ("5 kişi log okusun" = 5 user'ı `adm`'e ekle).
 
-## 3.2 — Dört dosya
+## 4.2 — Dört dosya
 
 User/group sisteminin tamamı 4 metin dosyası. Veritabanı yok, servis yok. `adduser`, `usermod`, `gpasswd` bunları düzenleyen programlar.
 
@@ -165,7 +236,7 @@ isim şifre GID     ek üyeler
 
 Primary üyeler burada görünmez, `passwd`'deki GID'de yazılı. `deneme:x:1001:` boş = kimse ek üye değil, ama `deneme` primary olarak içinde.
 
-## 3.3 — User yaratma
+## 4.3 — User yaratma
 
 ```
 $ sudo adduser deneme
@@ -186,7 +257,7 @@ New password:
 
 `/etc/skel` = iskelet: `.bashrc`, `.profile`, `.bash_logout`. Buraya konan her şey sonraki her user'a gider.
 
-## 3.4 — `ls -l` formatı
+## 4.4 — `ls -l` formatı
 
 ```
 -rw-r-----  1  syslog  adm  313512  Sep 20 22:00  /var/log/syslog
@@ -203,7 +274,7 @@ New password:
 
 `syslog` bir servis hesabı: `syslog:x:102:102::/nonexistent:/usr/sbin/nologin`. Yazan ile okuyan ayrılmış.
 
-## 3.5 — Group ile yetki
+## 4.5 — Group ile yetki
 
 `deneme` `adm`'de değil → others → `---`:
 
@@ -227,7 +298,7 @@ $ su - deneme -c 'head -3 /var/log/syslog'
 | sıra | flag → group → user | flag → user → group |
 | tehlike | `-a` unutulursa liste ezilir | yok |
 
-⚠️ Group değişikliği açık oturumu etkilemez; çıkıp gir veya `newgrp` (3.9).
+⚠️ Group değişikliği açık oturumu etkilemez; çıkıp gir veya `newgrp` (4.9).
 
 **`su` vs `sudo`**
 
@@ -239,9 +310,9 @@ $ su - deneme -c 'head -3 /var/log/syslog'
 | kısıtlanır mı | evet, komut bazlı | hayır |
 | hedef `nologin` ise | çalışır (shell'i atlar) | çalışmaz |
 
-`su - X`: `-` = login shell, X'in ortamını sıfırdan kur. Tiresiz kullanma. `-c 'cmd'` = shell açma, komutu çalıştır çık.
+`su - <user>`: `-` = login shell, <user>'in ortamını sıfırdan kur. Tiresiz kullanma. `-c 'cmd'` = shell açma, komutu çalıştır çık.
 
-## 3.6 — Bir programı kim çalıştırır
+## 4.6 — Bir programı kim çalıştırır
 
 **Yol 1: program user yetkisiyle çalışıyor → dosya group'u + `chmod 750`**
 
@@ -297,7 +368,7 @@ Aynı `cat`, farklı argüman, red. sudoers komutu **argümanıyla** eşleştiri
 | `ubuntu ALL=(ALL) NOPASSWD:ALL` | cloud-init'in yazdığı, `/etc/sudoers.d/90-cloud-init-users`. Şifre sormama sebebi |
 | okuyan | `sudo` komutunun kendisi, her seferinde. Daemon yok |
 
-## 3.7 — Group silme ve öksüz GID
+## 4.7 — Group silme ve öksüz GID
 
 ```
 $ sudo gpasswd -d deneme adm
@@ -317,7 +388,7 @@ $ sudo chgrp root /usr/local/bin/gizli-program
 
 `2>/dev/null` = stderr'i yut (`find` `/proc`'ta kendi kuyruğunu kovalar, gürültü). Doğru sıra: **önce `find`, sonra `groupdel`/`deluser`**.
 
-## 3.8 — Primary group
+## 4.8 — Primary group
 
 Tek işi: yarattığın yeni dosyanın group'u. Ek group "nereye erişirim", primary "yarattığım kime ait".
 
@@ -329,9 +400,9 @@ deneme:x:1001:1002:...                         # GID 1001 → 1002
 
 ⚠️ `usermod -g` **home'daki** eski primary'ye ait dosyaları da yeni group'a taşır. Home dışına dokunmaz. Geri: `sudo usermod -g deneme deneme`.
 
-Umask notu: primary group adı = user adı ise umask `002` (`-rw-rw-r--`), değilse `022` (`-rw-r--r--`). Bölüm 8.
+Umask notu: primary group adı = user adı ise umask `002` (`-rw-rw-r--`), değilse `022` (`-rw-r--r--`). Bölüm 9.
 
-## 3.9 — `newgrp`: çıkıp girmeden group
+## 4.9 — `newgrp`: çıkıp girmeden group
 
 Shell group listesini **login anında** kopyalar. `usermod` dosyayı değiştirir, açık shell'i değil:
 
@@ -352,12 +423,12 @@ deneme@lev-k:~$ id
 uid=1001(deneme) gid=1002(gizli) groups=1002(gizli),100(users),1001(deneme)
 ```
 
-| `newgrp G` | |
+| `newgrp <group>` | |
 |---|---|
-| ne yapar | iç shell açar (`$SHLVL` 1→2), G'yi ekler **ve primary yapar** |
+| ne yapar | iç shell açar (`$SHLVL` 1→2), `<group>`'ı ekler **ve primary yapar** |
 | şart | `/etc/group`'ta üye olmak; değilsen group şifresi (yok) → red |
 | kalıcı mı | hayır, `exit` ile eski shell'e dön |
-| `sg G -c 'cmd'` | shell açmadan tek komut |
+| `sg <group> -c 'cmd'` | shell açmadan tek komut |
 
 ```
 deneme@lev-k:~$ touch test1.txt               # iç shell'de → group gizli
@@ -372,23 +443,23 @@ Process ağacı:
 su (root) → -bash (deneme, login) → newgrp → bash (deneme, gizli aktif)
 ```
 
-## 3.10 — User kısıtlama
+## 4.10 — User kısıtlama
 
 Silmeden erişimi kesmek. Hepsi `passwd`/`shadow`'daki bir alanı değiştirir.
 
 | Komut | Kapatır | Açık kalır | Senaryo |
 |---|---|---|---|
-| `passwd -l X` | şifreyle login (hash başına `!`) | SSH key, cron, çalışan process | izin, geçici askı |
-| `usermod -s /usr/sbin/nologin X` | her türlü interaktif login | cron, çalışan process | kalıcı kapatma, servis hesabı |
-| `usermod -e 2026-12-31 X` | tarihten sonra her şey | tarihe kadar her şey | stajyer, geçici erişim |
-| `chage -M 90 X` | 90 gün sonra şifre zorla değişir | her şey | şifre politikası |
+| `passwd -l <user>` | şifreyle login (hash başına `!`) | SSH key, cron, çalışan process | izin, geçici askı |
+| `usermod -s /usr/sbin/nologin <user>` | her türlü interaktif login | cron, çalışan process | kalıcı kapatma, servis hesabı |
+| `usermod -e 2026-12-31 <user>` | tarihten sonra her şey | tarihe kadar her şey | stajyer, geçici erişim |
+| `chage -M 90 <user>` | 90 gün sonra şifre zorla değişir | her şey | şifre politikası |
 
 | Geri alma | |
 |---|---|
-| `passwd -u X` | kilidi aç, eski şifre çalışır |
-| `usermod -s /bin/bash X` | shell'i geri ver |
-| `usermod -e '' X` | expire'ı kaldır |
-| `chage -l X` | tüm süre bilgilerini okunabilir göster |
+| `passwd -u <user>` | kilidi aç, eski şifre çalışır |
+| `usermod -s /bin/bash <user>` | shell'i geri ver |
+| `usermod -e '' <user>` | expire'ı kaldır |
+| `chage -l <user>` | tüm süre bilgilerini okunabilir göster |
 
 Hata mesajları farklı, nerede takıldığını söyler:
 
@@ -412,7 +483,7 @@ Password:
 Buraya giris yok canim :)
 ```
 
-## 3.11 — Servis hesabı
+## 4.11 — Servis hesabı
 
 Uygulamayı root olarak çalıştırma; hack'lenirse saldırgan root olur. Uygulamaya özel, login yapamayan, home'suz user. `syslog`, `sshd`, `www-data` böyle. Kubernetes `runAsUser` aynı fikir.
 
@@ -508,12 +579,12 @@ Süreç:
 
 Temizlik: `stop` → `rm unit` → `daemon-reload` → `deluser --system myapp` → `rm -rf /var/lib/myapp` → `rm script`.
 
-## 3.12 — User silme
+## 4.12 — User silme
 
 | Komut | Home | Diğer dosyalar |
 |---|---|---|
-| `sudo deluser X` | kalır | dokunmaz |
-| `sudo deluser --remove-home X` | silinir | dokunmaz |
+| `sudo deluser <user>` | kalır | dokunmaz |
+| `sudo deluser --remove-home <user>` | silinir | dokunmaz |
 
 Diğer yerlerdeki dosyalar UID ile öksüz kalır; aynı UID'yi alan yeni user miras alır.
 
@@ -560,7 +631,7 @@ Doğru sıra: **`find -uid` → sil/`chown` → `deluser`**.
 
 ---
 
-# Bölüm 4 — Package management (apt)
+# Bölüm 5 — Package management (apt)
 
 > 🔜 Placeholder — apt nasıl çalışır: repository'ler, sources list, GPG key'ler, binary kurulumu, update.
 
@@ -568,7 +639,7 @@ Doğru sıra: **`find -uid` → sil/`chown` → `deluser`**.
 
 ---
 
-# Bölüm 5 — Process management
+# Bölüm 6 — Process management
 
 > 🔜 Placeholder — ps, top/htop, signal'lar (SIGTERM vs SIGKILL), nice/renice.
 
@@ -576,7 +647,7 @@ Doğru sıra: **`find -uid` → sil/`chown` → `deluser`**.
 
 ---
 
-# Bölüm 6 — SSH & sshd
+# Bölüm 7 — SSH & sshd
 
 > 🔜 Placeholder — sshd kurulumu, key management, sshd_config, hardening.
 
@@ -584,7 +655,7 @@ Doğru sıra: **`find -uid` → sil/`chown` → `deluser`**.
 
 ---
 
-# Bölüm 7 — Networking temelleri
+# Bölüm 8 — Networking temelleri
 
 > 🔜 Placeholder — ip, ss, ping, DNS, firewall (ufw → nftables), network namespace'ler.
 
@@ -592,7 +663,7 @@ Doğru sıra: **`find -uid` → sil/`chown` → `deluser`**.
 
 ---
 
-# Bölüm 8 — File permissions & ownership
+# Bölüm 9 — File permissions & ownership
 
 > 🔜 Placeholder — chmod, chown, umask, setuid/setgid, ACL.
 
@@ -600,7 +671,7 @@ Doğru sıra: **`find -uid` → sil/`chown` → `deluser`**.
 
 ---
 
-# Bölüm 9 — Disk & filesystem
+# Bölüm 10 — Disk & filesystem
 
 > 🔜 Placeholder — mount, fstab, lsblk, df/du, LVM'e giriş.
 
@@ -608,7 +679,7 @@ Doğru sıra: **`find -uid` → sil/`chown` → `deluser`**.
 
 ---
 
-# Bölüm 10 — Cron & timers
+# Bölüm 11 — Cron & timers
 
 > 🔜 Placeholder — cron vs systemd timer.
 

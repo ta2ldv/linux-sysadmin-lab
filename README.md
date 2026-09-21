@@ -14,37 +14,108 @@ The longer-term goal behind this lab is virtualization and Kubernetes. Almost ev
 
 ## Table of contents
 
-- [Part 0 — Everything is a file](#part-0--everything-is-a-file)
-- [Part 1 — systemd & systemctl](#part-1--systemd--systemctl)
-- [Part 2 — Logging & journalctl](#part-2--logging--journalctl)
-- [Part 3 — Users & groups](#part-3--users--groups)
-- [Part 4 — Package management (apt)](#part-4--package-management-apt)
-- [Part 5 — Process management](#part-5--process-management)
-- [Part 6 — SSH & sshd](#part-6--ssh--sshd)
-- [Part 7 — Networking basics](#part-7--networking-basics)
-- [Part 8 — File permissions & ownership](#part-8--file-permissions--ownership)
-- [Part 9 — Disk & filesystem](#part-9--disk--filesystem)
-- [Part 10 — Cron & timers](#part-10--cron--timers)
+- [Part 0 — Linux filesystem layout](#part-0--linux-filesystem-layout)
+- [Part 1 — Everything is a file](#part-1--everything-is-a-file)
+- [Part 2 — systemd & systemctl](#part-2--systemd--systemctl)
+- [Part 3 — Logging & journalctl](#part-3--logging--journalctl)
+- [Part 4 — Users & groups](#part-4--users--groups)
+- [Part 5 — Package management (apt)](#part-5--package-management-apt)
+- [Part 6 — Process management](#part-6--process-management)
+- [Part 7 — SSH & sshd](#part-7--ssh--sshd)
+- [Part 8 — Networking basics](#part-8--networking-basics)
+- [Part 9 — File permissions & ownership](#part-9--file-permissions--ownership)
+- [Part 10 — Disk & filesystem](#part-10--disk--filesystem)
+- [Part 11 — Cron & timers](#part-11--cron--timers)
 
 ## Curriculum
 
 | # | Part | Question it answers | Status |
 |---|------|--------------------|--------|
-| 0 | [Everything is a file](#part-0--everything-is-a-file) | What is a file, a file descriptor, a socket — and why is *everything* one? | ⏳ |
-| 1 | [systemd & systemctl](#part-1--systemd--systemctl) | How does systemd control every program on the machine? | 🔜 |
-| 2 | [Logging & journalctl](#part-2--logging--journalctl) | Where do logs live, and how do I interrogate the journal? | 🔜 |
-| 3 | [Users & groups](#part-3--users--groups) | How do I create, restrict and destroy users — and what is a group really? | ✅ |
-| 4 | [Package management (apt)](#part-4--package-management-apt) | What actually happens on `apt install` — repos, GPG keys, binaries? | 🔜 |
-| 5 | [Process management](#part-5--process-management) | What is a process, a signal — and what really separates SIGTERM from SIGKILL? | 🔜 |
-| 6 | [SSH & sshd](#part-6--ssh--sshd) | How do I set up and harden sshd, and manage keys properly? | 🔜 |
-| 7 | [Networking basics](#part-7--networking-basics) | How does the machine talk — interfaces, DNS, firewall, namespaces? | 🔜 |
-| 8 | [File permissions & ownership](#part-8--file-permissions--ownership) | Who may touch what — chmod, umask, setuid, ACL? | 🔜 |
-| 9 | [Disk & filesystem](#part-9--disk--filesystem) | How do disks become directories — mount, fstab, LVM? | 🔜 |
-| 10 | [Cron & timers](#part-10--cron--timers) | How do I run things on a schedule — and cron vs systemd timers? | 🔜 |
+| 0 | [Linux filesystem layout](#part-0--linux-filesystem-layout) | What lives where in the directory tree — what are /etc, /var, /usr, /bin for? | ✅ |
+| 1 | [Everything is a file](#part-1--everything-is-a-file) | What is a file, a file descriptor, a socket — and why is *everything* one? | ⏳ |
+| 2 | [systemd & systemctl](#part-2--systemd--systemctl) | How does systemd control every program on the machine? | 🔜 |
+| 3 | [Logging & journalctl](#part-3--logging--journalctl) | Where do logs live, and how do I interrogate the journal? | 🔜 |
+| 4 | [Users & groups](#part-4--users--groups) | How do I create, restrict and destroy users — and what is a group really? | ✅ |
+| 5 | [Package management (apt)](#part-5--package-management-apt) | What actually happens on `apt install` — repos, GPG keys, binaries? | 🔜 |
+| 6 | [Process management](#part-6--process-management) | What is a process, a signal — and what really separates SIGTERM from SIGKILL? | 🔜 |
+| 7 | [SSH & sshd](#part-7--ssh--sshd) | How do I set up and harden sshd, and manage keys properly? | 🔜 |
+| 8 | [Networking basics](#part-8--networking-basics) | How does the machine talk — interfaces, DNS, firewall, namespaces? | 🔜 |
+| 9 | [File permissions & ownership](#part-9--file-permissions--ownership) | Who may touch what — chmod, umask, setuid, ACL? | 🔜 |
+| 10 | [Disk & filesystem](#part-10--disk--filesystem) | How do disks become directories — mount, fstab, LVM? | 🔜 |
+| 11 | [Cron & timers](#part-11--cron--timers) | How do I run things on a schedule — and cron vs systemd timers? | 🔜 |
 
 ---
 
-# Part 0 — Everything is a file
+# Part 0 — Linux filesystem layout
+
+Machine: Ubuntu 24.04 (AWS). This part isn't lab practice, it's a standard FHS (Filesystem Hierarchy Standard) reference.
+
+## Cheat sheet
+
+| Directory | Holds | Persistent | Written by |
+|-----------|-------|------------|------------|
+| `/etc` | system-wide config files (text) | persistent | root, packages at install time |
+| `/var` | data that changes: logs, cache, spool, databases | persistent | services, root |
+| `/usr` | installed programs + libraries + shared data | persistent, apt-managed | package manager (apt) |
+| `/bin` | core commands (`ls`, `cat`...) — symlink to `/usr/bin` on Ubuntu | persistent | package manager |
+| `/home` | users' personal files | persistent | the user themself |
+| `/tmp` | short-lived temporary files | cleaned periodically (`systemd-tmpfiles`), tmpfs or disk depending on the distro | everyone (world-writable, sticky bit) |
+| `/opt` | non-apt, self-contained 3rd-party software | persistent | manual installs |
+| `/proc` | running processes + kernel state — not a real file, a live view of the kernel | in RAM, not on disk | kernel |
+| `/sys` | virtual fs where the kernel exports device/driver info | in RAM, not on disk | kernel |
+| `/dev` | device nodes (`/dev/sda`, `/dev/null`, `/dev/tty1`...) | in RAM (devtmpfs), not on disk | kernel (udev) |
+| `/lib` | kernel modules + shared libraries for core programs — symlink to `/usr/lib` on Ubuntu | persistent | package manager |
+
+## 0.1 — Why `/bin` and `/lib` are symlinks
+
+Ubuntu adopted "usrmerge": `/bin`, `/sbin`, `/lib` used to be separate directories at the root, because early boot might happen before `/usr` was mounted. Now that the initramfs mounts everything early, the split became pointless — everything moved under `/usr`, and the old names stayed as symlinks for backward compatibility.
+
+```
+$ ls -la /
+lrwxrwxrwx ... bin -> usr/bin
+lrwxrwxrwx ... lib -> usr/lib
+lrwxrwxrwx ... sbin -> usr/sbin
+```
+
+| Path | Real location |
+|------|----------------|
+| `/bin/ls` | `/usr/bin/ls` |
+| `/sbin/reboot` | `/usr/sbin/reboot` |
+| `/lib/systemd` | `/usr/lib/systemd` |
+
+## 0.2 — `/proc`, `/sys`, `/dev`: not on disk
+
+All three are **virtual** filesystems. They show up in `df -h` but use no disk space; the kernel recreates them from scratch on every reboot.
+
+| Directory | Shows | Example |
+|-----------|-------|---------|
+| `/proc/<pid>/` | state of that process | `/proc/1/status`, `/proc/1/cmdline` |
+| `/proc/cpuinfo`, `/proc/meminfo` | kernel's view of hardware/resources | `cat /proc/meminfo` |
+| `/sys/class/net/` | kernel objects for network interfaces | `/sys/class/net/eth0` |
+| `/dev/sda`, `/dev/null`, `/dev/tty1` | device node — writing to it means talking to hardware | `echo hi > /dev/null` |
+
+## 0.3 — `/tmp` vs `/var/tmp` vs `/opt`
+
+| Directory | Lifetime | Use |
+|-----------|----------|-----|
+| `/tmp` | short — periodically swept by `systemd-tmpfiles` | short-lived temp files |
+| `/var/tmp` | kept longer than `/tmp`, always on disk | temp files for long-running jobs |
+| `/opt` | persistent, not managed by apt | 3rd-party software that ships as a single self-contained package (e.g. `/opt/google/chrome`) |
+
+## Notes
+
+- Almost everything under `/etc` is text config, not binary — not a hard rule, just the near-universal convention.
+- `/usr` is apt-managed territory: everything you `apt install` lands here, hands off otherwise.
+- Service accounts' home is usually `/nonexistent` or `/var/lib/<service>`, not under `/home` (see Part 4).
+
+Ask Levent:
+- Whether `/tmp` on this machine is actually mounted as tmpfs (RAM) or lives on disk — not verified with `mount | grep /tmp`.
+
+[↑ Go back to TOC](#table-of-contents)
+
+---
+
+# Part 1 — Everything is a file
 
 > ⏳ Placeholder — files, inodes, file descriptors, special files (device, pipe, socket), `lsof`, `/proc/PID/fd`.
 
@@ -52,7 +123,7 @@ The longer-term goal behind this lab is virtualization and Kubernetes. Almost ev
 
 ---
 
-# Part 1 — systemd & systemctl
+# Part 2 — systemd & systemctl
 
 > 🔜 Placeholder — how systemd controls programs: units, targets, service lifecycle, writing a unit file.
 
@@ -60,7 +131,7 @@ The longer-term goal behind this lab is virtualization and Kubernetes. Almost ev
 
 ---
 
-# Part 2 — Logging & journalctl
+# Part 3 — Logging & journalctl
 
 > 🔜 Placeholder — the journal, filtering by unit/time/priority, rsyslog, log rotation.
 
@@ -68,7 +139,7 @@ The longer-term goal behind this lab is virtualization and Kubernetes. Almost ev
 
 ---
 
-# Part 3 — Users & groups
+# Part 4 — Users & groups
 
 Machine: Ubuntu 24.04 (AWS). Main account `ubuntu`, test account `deneme`, service account `myapp`.
 
@@ -78,27 +149,27 @@ Machine: Ubuntu 24.04 (AWS). Main account `ubuntu`, test account `deneme`, servi
 |---|---|
 | `id [user]` | UID, primary GID, supplementary groups |
 | `id -gn user` | primary group name only |
-| `sudo adduser X` | user + group + home + skel copy |
-| `sudo adduser --system --group --no-create-home X` | service account: UID<1000, nologin, no home |
-| `sudo deluser X` / `--remove-home` | delete user / also delete home |
-| `sudo deluser --system X` | delete service account (refuses without the flag) |
-| `sudo groupadd G` / `sudo groupdel G` | create / delete group |
-| `sudo usermod -aG G X` | **append** to supplementary group (without `-a` the list is replaced) |
-| `sudo gpasswd -a X G` / `-d X G` | add to / remove from supplementary group |
-| `sudo usermod -g G X` | change primary group (also moves files in home) |
-| `sudo usermod -s SHELL X` | change login shell (`/usr/sbin/nologin` = disable) |
-| `sudo usermod -e YYYY-MM-DD X` / `-e ''` | expire account on date / clear |
-| `sudo passwd -l X` / `-u X` | lock / unlock password |
-| `sudo chage -l X` / `-M 90 X` | list aging info / password lifetime 90 days |
-| `newgrp G` | activate group without re-login (opens inner shell) |
-| `su - X` / `su - X -c 'cmd'` | become X / run one command as X (X's password) |
-| `sudo -u X cmd` | run one command as X (your password, skips shell) |
-| `sudo visudo -f /etc/sudoers.d/X` | write a sudoers rule (syntax-checked) |
-| `sudo find / -uid N` / `-gid N 2>/dev/null` | find orphaned files |
-| `sudo chgrp G file` | change a file's group |
+| `sudo adduser <user>` | user + group + home + skel copy |
+| `sudo adduser --system --group --no-create-home <user>` | service account: UID<1000, nologin, no home |
+| `sudo deluser <user>` / `--remove-home` | delete user / also delete home |
+| `sudo deluser --system <user>` | delete service account (refuses without the flag) |
+| `sudo groupadd <group>` / `sudo groupdel <group>` | create / delete group |
+| `sudo usermod -aG <group> <user>` | **append** to supplementary group (without `-a` the list is replaced) |
+| `sudo gpasswd -a <user> <group>` / `-d <user> <group>` | add to / remove from supplementary group |
+| `sudo usermod -g <group> <user>` | change primary group (also moves files in home) |
+| `sudo usermod -s <shell> <user>` | change login shell (`/usr/sbin/nologin` = disable) |
+| `sudo usermod -e YYYY-MM-DD <user>` / `-e ''` | expire account on date / clear |
+| `sudo passwd -l <user>` / `-u <user>` | lock / unlock password |
+| `sudo chage -l <user>` / `-M 90 <user>` | list aging info / password lifetime 90 days |
+| `newgrp <group>` | activate group without re-login (opens inner shell) |
+| `su - <user>` / `su - <user> -c 'cmd'` | become `<user>` / run one command as `<user>` (`<user>`'s password) |
+| `sudo -u <user> cmd` | run one command as `<user>` (your password, skips shell) |
+| `sudo visudo -f /etc/sudoers.d/<user>` | write a sudoers rule (syntax-checked) |
+| `sudo find / -uid <uid>` / `-gid <gid> 2>/dev/null` | find orphaned files |
+| `sudo chgrp <group> file` | change a file's group |
 | `cut -d: -f1 /etc/passwd` | all usernames |
 
-## 3.1 — Identity
+## 4.1 — Identity
 
 ```
 $ id
@@ -120,7 +191,7 @@ uid=1000(ubuntu) gid=1000(ubuntu) groups=1000(ubuntu),4(adm),24(cdrom),27(sudo),
 
 User and group work together: if you are the owner, your user decides; otherwise your group membership does. Admin habit is to manage via groups ("5 people should read logs" = add 5 users to `adm`).
 
-## 3.2 — The four files
+## 4.2 — The four files
 
 The whole user/group system is 4 text files. No database, no daemon. `adduser`, `usermod`, `gpasswd` are programs that edit them.
 
@@ -165,7 +236,7 @@ name pw  GID   supplementary members
 
 Primary members don't appear here; they're in the GID field of `passwd`. `deneme:x:1001:` empty = nobody is a supplementary member, but `deneme` is in it as primary.
 
-## 3.3 — Creating a user
+## 4.3 — Creating a user
 
 ```
 $ sudo adduser deneme
@@ -186,7 +257,7 @@ New password:
 
 `/etc/skel` = skeleton: `.bashrc`, `.profile`, `.bash_logout`. Anything placed here goes into every future user.
 
-## 3.4 — `ls -l` format
+## 4.4 — `ls -l` format
 
 ```
 -rw-r-----  1  syslog  adm  313512  Sep 20 22:00  /var/log/syslog
@@ -203,7 +274,7 @@ Permissions are 3 blocks: **owner / group / others** (`u`/`g`/`o`). First charac
 
 `syslog` is a service account: `syslog:x:102:102::/nonexistent:/usr/sbin/nologin`. Writer and readers are separated.
 
-## 3.5 — Privilege through groups
+## 4.5 — Privilege through groups
 
 `deneme` is not in `adm` → others → `---`:
 
@@ -227,7 +298,7 @@ $ su - deneme -c 'head -3 /var/log/syslog'
 | order | flag → group → user | flag → user → group |
 | danger | forget `-a` and the list is replaced | none |
 
-⚠️ Group changes don't affect open sessions; re-login or `newgrp` (3.9).
+⚠️ Group changes don't affect open sessions; re-login or `newgrp` (4.9).
 
 **`su` vs `sudo`**
 
@@ -239,9 +310,9 @@ $ su - deneme -c 'head -3 /var/log/syslog'
 | restrictable | yes, per command | no |
 | target is `nologin` | works (skips the shell) | fails |
 
-`su - X`: `-` = login shell, rebuild X's environment from scratch. Don't use it without the dash. `-c 'cmd'` = no shell, run the command and exit.
+`su - <user>`: `-` = login shell, rebuild <user>'s environment from scratch. Don't use it without the dash. `-c 'cmd'` = no shell, run the command and exit.
 
-## 3.6 — Who may run a program
+## 4.6 — Who may run a program
 
 **Way 1: program runs with user privileges → file group + `chmod 750`**
 
@@ -297,7 +368,7 @@ Same `cat`, different argument, denied. sudoers matches the command **with its a
 | `ubuntu ALL=(ALL) NOPASSWD:ALL` | written by cloud-init, `/etc/sudoers.d/90-cloud-init-users`. Why no password prompt |
 | reader | the `sudo` command itself, every run. No daemon |
 
-## 3.7 — Deleting groups and orphaned GIDs
+## 4.7 — Deleting groups and orphaned GIDs
 
 ```
 $ sudo gpasswd -d deneme adm
@@ -317,7 +388,7 @@ $ sudo chgrp root /usr/local/bin/gizli-program
 
 `2>/dev/null` = swallow stderr (`find` chases its own tail in `/proc`, noise). Right order: **`find` first, then `groupdel`/`deluser`**.
 
-## 3.8 — Primary group
+## 4.8 — Primary group
 
 One job: the group of files you create. Supplementary = "where can I reach", primary = "what I create belongs to whom".
 
@@ -329,9 +400,9 @@ deneme:x:1001:1002:...                         # GID 1001 → 1002
 
 ⚠️ `usermod -g` also moves files **in home** owned by the old primary group to the new one. Doesn't touch anything outside home. Revert: `sudo usermod -g deneme deneme`.
 
-Umask note: if primary group name = username, umask is `002` (`-rw-rw-r--`), otherwise `022` (`-rw-r--r--`). Part 8.
+Umask note: if primary group name = username, umask is `002` (`-rw-rw-r--`), otherwise `022` (`-rw-r--r--`). Part 9.
 
-## 3.9 — `newgrp`: group without re-login
+## 4.9 — `newgrp`: group without re-login
 
 The shell copies the group list **at login**. `usermod` changes the file, not the open shell:
 
@@ -352,12 +423,12 @@ deneme@lev-k:~$ id
 uid=1001(deneme) gid=1002(gizli) groups=1002(gizli),100(users),1001(deneme)
 ```
 
-| `newgrp G` | |
+| `newgrp <group>` | |
 |---|---|
-| does | opens an inner shell (`$SHLVL` 1→2), adds G **and makes it primary** |
+| does | opens an inner shell (`$SHLVL` 1→2), adds `<group>` **and makes it primary** |
 | requires | membership in `/etc/group`; otherwise asks for a group password (none) → denied |
 | permanent | no, `exit` returns to the old shell |
-| `sg G -c 'cmd'` | one command without opening a shell |
+| `sg <group> -c 'cmd'` | one command without opening a shell |
 
 ```
 deneme@lev-k:~$ touch test1.txt               # inner shell → group gizli
@@ -372,23 +443,23 @@ Process tree:
 su (root) → -bash (deneme, login) → newgrp → bash (deneme, gizli active)
 ```
 
-## 3.10 — Restricting users
+## 4.10 — Restricting users
 
 Cut access without deleting. Each one changes a field in `passwd`/`shadow`.
 
 | Command | Blocks | Still open | Scenario |
 |---|---|---|---|
-| `passwd -l X` | password login (`!` before hash) | SSH key, cron, running processes | leave, temporary suspension |
-| `usermod -s /usr/sbin/nologin X` | every interactive login | cron, running processes | permanent shutdown, service accounts |
-| `usermod -e 2026-12-31 X` | everything after the date | everything until then | intern, temporary access |
-| `chage -M 90 X` | forces password change after 90 days | everything | password policy |
+| `passwd -l <user>` | password login (`!` before hash) | SSH key, cron, running processes | leave, temporary suspension |
+| `usermod -s /usr/sbin/nologin <user>` | every interactive login | cron, running processes | permanent shutdown, service accounts |
+| `usermod -e 2026-12-31 <user>` | everything after the date | everything until then | intern, temporary access |
+| `chage -M 90 <user>` | forces password change after 90 days | everything | password policy |
 
 | Revert | |
 |---|---|
-| `passwd -u X` | unlock, old password works |
-| `usermod -s /bin/bash X` | restore shell |
-| `usermod -e '' X` | clear expiry |
-| `chage -l X` | show all aging info, human-readable |
+| `passwd -u <user>` | unlock, old password works |
+| `usermod -s /bin/bash <user>` | restore shell |
+| `usermod -e '' <user>` | clear expiry |
+| `chage -l <user>` | show all aging info, human-readable |
 
 Error messages differ and tell you where it stopped:
 
@@ -412,7 +483,7 @@ Password:
 Buraya giris yok canim :)
 ```
 
-## 3.11 — Service accounts
+## 4.11 — Service accounts
 
 Don't run applications as root; if hacked, the attacker is root. Give the app its own user that can't log in and has no home. `syslog`, `sshd`, `www-data` are like this. Kubernetes `runAsUser` is the same idea.
 
@@ -508,12 +579,12 @@ Process:
 
 Cleanup: `stop` → `rm unit` → `daemon-reload` → `deluser --system myapp` → `rm -rf /var/lib/myapp` → `rm script`.
 
-## 3.12 — Deleting a user
+## 4.12 — Deleting a user
 
 | Command | Home | Other files |
 |---|---|---|
-| `sudo deluser X` | kept | untouched |
-| `sudo deluser --remove-home X` | deleted | untouched |
+| `sudo deluser <user>` | kept | untouched |
+| `sudo deluser --remove-home <user>` | deleted | untouched |
 
 Files elsewhere are orphaned by UID; a new user that gets the same UID inherits them.
 
@@ -560,7 +631,7 @@ Right order: **`find -uid` → delete/`chown` → `deluser`**.
 
 ---
 
-# Part 4 — Package management (apt)
+# Part 5 — Package management (apt)
 
 > 🔜 Placeholder — how apt works: repositories, sources lists, GPG keys, installing binaries, updates.
 
@@ -568,7 +639,7 @@ Right order: **`find -uid` → delete/`chown` → `deluser`**.
 
 ---
 
-# Part 5 — Process management
+# Part 6 — Process management
 
 > 🔜 Placeholder — ps, top/htop, signals (SIGTERM vs SIGKILL), nice/renice.
 
@@ -576,7 +647,7 @@ Right order: **`find -uid` → delete/`chown` → `deluser`**.
 
 ---
 
-# Part 6 — SSH & sshd
+# Part 7 — SSH & sshd
 
 > 🔜 Placeholder — sshd setup, key management, sshd_config, hardening.
 
@@ -584,7 +655,7 @@ Right order: **`find -uid` → delete/`chown` → `deluser`**.
 
 ---
 
-# Part 7 — Networking basics
+# Part 8 — Networking basics
 
 > 🔜 Placeholder — ip, ss, ping, DNS, firewall (ufw → nftables), network namespaces.
 
@@ -592,7 +663,7 @@ Right order: **`find -uid` → delete/`chown` → `deluser`**.
 
 ---
 
-# Part 8 — File permissions & ownership
+# Part 9 — File permissions & ownership
 
 > 🔜 Placeholder — chmod, chown, umask, setuid/setgid, ACL.
 
@@ -600,7 +671,7 @@ Right order: **`find -uid` → delete/`chown` → `deluser`**.
 
 ---
 
-# Part 9 — Disk & filesystem
+# Part 10 — Disk & filesystem
 
 > 🔜 Placeholder — mount, fstab, lsblk, df/du, intro to LVM.
 
@@ -608,7 +679,7 @@ Right order: **`find -uid` → delete/`chown` → `deluser`**.
 
 ---
 
-# Part 10 — Cron & timers
+# Part 11 — Cron & timers
 
 > 🔜 Placeholder — cron vs systemd timers.
 
