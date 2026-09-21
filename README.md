@@ -33,7 +33,7 @@ The longer-term goal behind this lab is virtualization and Kubernetes. Almost ev
 |---|------|--------------------|--------|
 | 0 | [Linux filesystem layout](#part-0--linux-filesystem-layout) | What lives where in the directory tree — what are /etc, /var, /usr, /bin for? | ✅ |
 | 1 | [Everything is a file](#part-1--everything-is-a-file) | What is a file, a file descriptor, a socket — and why is *everything* one? | ⏳ |
-| 2 | [systemd & systemctl](#part-2--systemd--systemctl) | How does systemd control every program on the machine? | 🔜 |
+| 2 | [systemd & systemctl](#part-2--systemd--systemctl) | How does systemd control every program on the machine? | ✅ |
 | 3 | [Logging & journalctl](#part-3--logging--journalctl) | Where do logs live, and how do I interrogate the journal? | 🔜 |
 | 4 | [Users & groups](#part-4--users--groups) | How do I create, restrict and destroy users — and what is a group really? | ✅ |
 | 5 | [Package management (apt)](#part-5--package-management-apt) | What actually happens on `apt install` — repos, GPG keys, binaries? | 🔜 |
@@ -125,7 +125,279 @@ Ask Levent:
 
 # Part 2 — systemd & systemctl
 
-> 🔜 Placeholder — how systemd controls programs: units, targets, service lifecycle, writing a unit file.
+Machine: Ubuntu 24.04 (AWS), account `ubuntu` (sudo).
+
+## Cheat sheet
+
+| Command | What it does |
+|---|---|
+| `ps -p 1 -o pid,comm` | show who PID 1 is (systemd) |
+| `ps -ef --forest` | draw the process tree with indentation, show parent/child relationships |
+| `ps -p <pid> -o pid,ppid` | show a process's parent PID |
+| `systemctl status <service>` | show status |
+| `sudo systemctl start <service>` | start now |
+| `sudo systemctl stop <service>` | stop now |
+| `sudo systemctl restart <service>` | stop + start |
+| `sudo systemctl reload <service>` | re-read config without killing the process (services that support it) |
+| `sudo systemctl enable <service>` | start automatically at boot (creates a symlink) |
+| `sudo systemctl disable <service>` | don't start at boot (removes the symlink) |
+| `journalctl -u <service> -n N` | last N log lines |
+| `journalctl -u <service> -f` | follow the log live |
+| `ls -la /etc/systemd/system/` | units the admin added/enabled by hand, and symlinks |
+
+## 2.1 — PID 1: systemd
+
+The kernel's first process at boot is systemd; every other process on the system (services, your shell, your SSH connection) is its child, directly or indirectly.
+
+```
+$ ps -p 1 -o pid,comm
+    PID COMMAND
+      1 systemd
+```
+
+| Flag | Meaning |
+|---|---|
+| `-p` | filter by PID |
+| `-o pid,comm` | show only PID and process name (command) |
+
+Practical relevance: `systemctl` commands work because you're talking to systemd; `kill -9 1` would theoretically crash the machine, since you'd be killing the root.
+
+## 2.2 — systemd is a daemon, systemctl is a client
+
+`systemd` (PID 1) is a daemon that runs continuously in the background — starting/stopping services, reading unit files is its actual job. `systemctl` doesn't do the work itself; it sends systemd a "do this" message.
+
+That communication happens over **D-Bus** — a Linux IPC (inter-process communication) system used for processes to talk to each other. `systemctl` sends a D-Bus message; systemd (the listener on D-Bus) receives and processes it. Not just systemd — many Linux services (NetworkManager, the bluetooth stack) use D-Bus too.
+
+## 2.3 — Process tree: parent/child
+
+`ps -ef --forest` draws the output as a tree — indentation and `└─` characters show which process is whose child. systemd (PID 1) sits at the top-left, everything else branches down from there.
+
+| Command | For |
+|---|---|
+| `ps -ef --forest \| grep sshd` | filter to just the sshd branch |
+| `ps -ef --forest \| less` then `/sshd` | interactive search; `n` next match, `q` quit |
+
+```
+systemd (PID 1)
+ └─ sshd listener (857, root)               — always-running sshd, waiting for connections
+     ├─ sshd: ubuntu [priv] (858)            — privilege-separation process for pts/0
+     │   └─ sshd: ubuntu@pts/0 (1003)        — first SSH session
+     │       └─ -bash (1049)
+     └─ sshd: ubuntu [priv] (860)            — pts/1 (the one in use now)
+         └─ sshd: ubuntu@pts/1 (1048)
+             └─ -bash (1058)
+                 ├─ ps -ef --forest (1144)
+                 └─ less (1145)
+```
+
+Verifying the chain one hop at a time with `ps -p <pid> -o pid,ppid`:
+
+| PID | PPID |
+|---|---|
+| 1058 | 1048 |
+| 1048 | 860 |
+| 860 | 857 |
+| 857 | 1 |
+| 1 | 0 |
+
+PID 1's PPID is 0 — the kernel itself.
+
+## 2.4 — systemd unit directories
+
+| Directory | Priority | Written by |
+|---|---|---|
+| `/etc/systemd/system/` | high | sysadmin (hand-added/overridden units, symlinks created by `enable`) |
+| `/run/systemd/system/` | mid | systemd/programs (runtime-generated temporary units, deleted on reboot) |
+| `/usr/lib/systemd/system/` (symlink: `/lib/systemd/system/`) | low | apt/dpkg (default unit files installed by packages) |
+
+| Config/state files | Holds |
+|---|---|
+| `/etc/systemd/*.conf` (`system.conf`, `journald.conf`, `logind.conf`...) | systemd's own behavior settings |
+| `/var/lib/systemd/` | systemd's state files |
+| `/var/log/journal/` | where journalctl logs live (if persistent) |
+
+## 2.5 — Inspecting the directory: symlinks
+
+```
+$ ls -la /etc/systemd/system/ /lib/systemd/system/ 2>&1 | head -30
+/etc/systemd/system/:
+lrwxrwxrwx  1 root root   38 Jun 10 10:16 chronyd.service -> /usr/lib/systemd/system/chrony.service
+drwxr-xr-x  2 root root 4096 Jun 10 10:10 cloud-config.target.wants
+lrwxrwxrwx  1 root root   44 Jun 10 10:11 dbus-org.freedesktop.ModemManager1.service -> /usr/lib/systemd/system/ModemManager.service
+lrwxrwxrwx  1 root root   48 Jun 10 10:08 dbus-org.freedesktop.resolve1.service -> /usr/lib/systemd/system/systemd-resolved.service
+drwxr-xr-x  2 root root 4096 Sep 20 20:50 multi-user.target.wants
+-rw-r--r--  1 root root  359 Jun 10 10:16 snap-amazon\x2dssm\x2dagent-13009.mount
+-rw-r--r--  1 root root  591 Sep 20 20:50 snap.amazon-ssm-agent.amazon-ssm-agent.service
+```
+
+| Entry type | Example | What it means |
+|---|---|---|
+| symlink (starts with `l`) | `chronyd.service -> .../chrony.service` | someone ran `systemctl enable chronyd`; `enable` doesn't copy the file, it creates a symlink pointing to the original in `/usr/lib/systemd/system/` |
+| `.wants`/`.requires` directory | `multi-user.target.wants/` | "when this target runs, these should run too" list — contents are always symlinks only |
+| plain file (starts with `-`) | `snap-core22-2411.mount` | a real unit file, usually auto-generated (snap packages) |
+
+Verification:
+
+```
+$ ls -l /etc/systemd/system/chronyd.service
+lrwxrwxrwx 1 root root 38 Jun 10 10:16 /etc/systemd/system/chronyd.service -> /usr/lib/systemd/system/chrony.service
+$ ls -l /usr/lib/systemd/system/chrony.service
+-rw-r--r-- 1 root root 1923 Jul  2  2024 /usr/lib/systemd/system/chrony.service
+```
+
+## 2.6 — The `.wants` mechanism and targets
+
+`multi-user.target` = the state where the system has "network up, multi-user capable, no graphical interface" — the normal boot target used on servers.
+
+| Rule | Explanation |
+|---|---|
+| Contents of `.wants`/`.requires` | always symlinks only, never a real file |
+| Which target it's linked to | depends on the `WantedBy=<target>` line in the unit file's `[Install]` section; `enable` drops the symlink into that target's `.wants/` directory |
+| Relation to boot | at boot systemd tries to reach a default target (usually `multi-user.target`), and starts every service in that target's `.wants/` directory along the way |
+
+## 2.7 — Unit file anatomy
+
+```
+$ cat /lib/systemd/system/cron.service
+[Unit]
+Description=Regular background program processing daemon
+Documentation=man:cron(8)
+After=remote-fs.target nss-user-lookup.target
+
+[Service]
+EnvironmentFile=-/etc/default/cron
+ExecStart=/usr/sbin/cron -f -P $EXTRA_OPTS
+IgnoreSIGPIPE=false
+KillMode=process
+Restart=on-failure
+SyslogFacility=cron
+
+[Install]
+WantedBy=multi-user.target
+```
+
+| Section | Content |
+|---|---|
+| `[Unit]` | identity and dependencies — `Description=`, `After=`, `Before=`, `Requires=`, `Wants=` |
+| `[Service]` | type-specific — `ExecStart=`, `ExecStop=`, `Restart=`, `Type=`, `User=` |
+| `[Install]` | what happens on enable, which target to attach to — `WantedBy=`, `RequiredBy=`, `Alias=` |
+
+| Unit type | Represents | Example |
+|---|---|---|
+| `.service` | a process/daemon | `cron.service`, `nginx.service` |
+| `.mount` | a filesystem mount point | `boot-efi.mount` |
+| `.socket` | a network/IPC socket — triggers the associated service on connection | `docker.socket` |
+| `.timer` | a scheduled task, similar to cron | `apt-daily.timer` |
+| `.target` | a synchronization point representing a group of units (not a real process) | `multi-user.target` |
+
+### Case study: writing the `logger-demo` service
+
+| Step | Command |
+|---|---|
+| write the script | `sudo tee /usr/local/bin/logger-demo.sh > /dev/null << 'EOF' ... EOF` + `sudo chmod +x` |
+| write the unit file | `sudo tee /etc/systemd/system/logger-demo.service > /dev/null << 'EOF' ... EOF` |
+| check it's loaded | `systemctl status logger-demo` |
+| start | `sudo systemctl start logger-demo` |
+| check status | `systemctl status logger-demo` |
+| start at boot | `sudo systemctl enable logger-demo` |
+| watch logs | `journalctl -u logger-demo -n 5` / `-f` |
+| stop + disable | `sudo systemctl stop logger-demo` / `sudo systemctl disable logger-demo` |
+| reboot test (disabled) | `sudo reboot` → `systemctl status logger-demo` |
+| reboot test (enabled) | `sudo systemctl enable logger-demo` → `sudo reboot` → `systemctl status logger-demo` |
+
+Script:
+```bash
+#!/bin/bash
+counter=0
+while true; do
+  echo "$(date '+%Y-%m-%d %H:%M:%S') - heartbeat #$counter"
+  counter=$((counter + 1))
+  sleep 5
+done
+```
+
+Unit:
+```ini
+[Unit]
+Description=Demo heartbeat logger
+
+[Service]
+ExecStart=/usr/local/bin/logger-demo.sh
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target
+```
+
+Process:
+
+1. The moment the unit file is written to `/etc/systemd/system/`, `systemctl status logger-demo` already recognizes it — but since it hasn't been started, it's `inactive`:
+   ```
+   ○ logger-demo.service - Demo heartbeat logger
+        Loaded: loaded (/etc/systemd/system/logger-demo.service; disabled; preset: enabled)
+        Active: inactive (dead)
+   ```
+2. After `sudo systemctl start logger-demo` it's running, but `Loaded` still says `disabled` — **start and enable are independent steps**, starting a service doesn't mean it'll start at boot:
+   ```
+   ● logger-demo.service - Demo heartbeat logger
+        Loaded: loaded (/etc/systemd/system/logger-demo.service; disabled; preset: enabled)
+        Active: active (running) since Mon 2026-09-21 22:00:05 UTC; 9s ago
+      Main PID: 1901 (logger-demo.sh)
+         Tasks: 2 (limit: 265)
+        Memory: 856.0K (peak: 1.1M)
+           CPU: 12ms
+        CGroup: /system.slice/logger-demo.service
+                ├─1901 /bin/bash /usr/local/bin/logger-demo.sh
+                └─1907 sleep 5
+   ```
+   `ls /etc/systemd/system/multi-user.target.wants/ | grep logger` returns **empty** at this point — it hasn't been `enable`d yet.
+3. `sudo systemctl enable logger-demo` does two things: `Loaded` now says `enabled`, and a symlink appears in `.wants/`:
+   ```
+   $ sudo systemctl enable logger-demo
+   Created symlink /etc/systemd/system/multi-user.target.wants/logger-demo.service → /etc/systemd/system/logger-demo.service.
+   $ ls -la /etc/systemd/system/multi-user.target.wants/logger-demo.service
+   lrwxrwxrwx 1 root root 39 Sep 21 22:03 ... -> /etc/systemd/system/logger-demo.service
+   ```
+4. `journalctl -u logger-demo -n 5` shows the service's logs; `-f` follows live (`^C` to exit):
+   ```
+   Sep 21 22:05:05 lev-k logger-demo.sh[1901]: 2026-09-21 22:05:05 - heartbeat #60
+   Sep 21 22:05:10 lev-k logger-demo.sh[1901]: 2026-09-21 22:05:10 - heartbeat #61
+   ```
+5. `stop` kills the process with `SIGTERM` (`code=killed, signal=TERM`), `disable` removes the symlink:
+   ```
+   $ sudo systemctl disable logger-demo
+   Removed "/etc/systemd/system/multi-user.target.wants/logger-demo.service".
+   ```
+6. **Reboot test 1 (disabled):** before `sudo reboot`, `Loaded: disabled` / `Active: inactive`. Same after reboot: still `disabled` / `inactive` — a disabled service doesn't come up on its own at reboot.
+7. **Reboot test 2 (enabled):** after `sudo systemctl enable logger-demo` the `.wants/` symlink reappears, `Loaded: enabled` but still `Active: inactive` (not started yet). After `sudo reboot`, the service is running again automatically **with a new PID**:
+   ```
+   ● logger-demo.service - Demo heartbeat logger
+        Loaded: loaded (/etc/systemd/system/logger-demo.service; enabled; preset: enabled)
+        Active: active (running) since Mon 2026-09-21 22:15:36 UTC; 24s ago
+      Main PID: 525 (logger-demo.sh)
+   Sep 21 22:15:36 lev-k systemd[1]: Started logger-demo.service - Demo heartbeat logger.
+   ```
+   Process state is never preserved across reboot (the old PID 1901 is gone, new PID 525); the only thing that survives is the symlink in `.wants/` — i.e. the "this service should start at boot" fact.
+
+## Relationship to Kubernetes
+
+- On a Kubernetes node, `kubelet` is just an ordinary systemd-managed service on the host; `systemctl status kubelet` / `journalctl -u kubelet -f` work exactly the way we learned here.
+- The container runtime (`containerd` or `CRI-O`) also runs as its own systemd unit — kubelet talks to it over CRI (Container Runtime Interface), and systemd keeps both of them alive independently.
+- **cgroup driver**: both kubelet and the runtime manage container resource limits (cgroups) using either the `systemd` driver or the older `cgroupfs` driver. If they use different drivers, the machine ends up with two separate cgroup management authorities, and the node can become unstable.
+- That's why kubelet and the runtime must use the **same** cgroup driver; on systemd-based distros (Ubuntu included) the recommended one is the `systemd` driver, since systemd is already the single cgroup manager on the box.
+- The same model holds on OpenShift/RHEL CoreOS: kubelet and CRI-O also run as systemd units, and node configuration (the machine-config-operator) updates those same unit files.
+
+## Notes
+
+| Flag | Meaning |
+|---|---|
+| `ps -p` | filter by PID |
+| `ps -o pid,comm` / `pid,ppid` | show only the requested columns |
+| `ps -ef --forest` | tree view |
+
+- `start` and `enable` are independent: `start` runs it now, `enable` makes it run at boot. Doing one doesn't do the other.
+- The contents of `.wants`/`.requires` directories are always symlinks; the unit file itself lives in `/etc/systemd/system/` or `/usr/lib/systemd/system/`.
+- The reboot test showed process state isn't preserved (new PID); the only thing that persists is the enabled state (whether the symlink exists).
 
 [↑ Go back to TOC](#table-of-contents)
 

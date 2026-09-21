@@ -33,7 +33,7 @@ Bu lab'ın uzun vadeli hedefi virtualization ve Kubernetes. Buradaki hemen her b
 |---|-------|------------------|-------|
 | 0 | [Linux dosya yapısı](#bölüm-0--linux-dosya-yapısı) | Dizin ağacında ne nerede duruyor — /etc, /var, /usr, /bin ne için var? | ✅ |
 | 1 | [Everything is a file](#bölüm-1--everything-is-a-file) | File nedir, file descriptor nedir, socket nedir — ve neden *her şey* bir file? | ⏳ |
-| 2 | [systemd & systemctl](#bölüm-2--systemd--systemctl) | systemd makinedeki her programı nasıl kontrol ediyor? | 🔜 |
+| 2 | [systemd & systemctl](#bölüm-2--systemd--systemctl) | systemd makinedeki her programı nasıl kontrol ediyor? | ✅ |
 | 3 | [Logging & journalctl](#bölüm-3--logging--journalctl) | Log'lar nerede yaşıyor, journal nasıl sorgulanır? | 🔜 |
 | 4 | [Users & groups](#bölüm-4--users--groups) | User nasıl yaratılır, kısıtlanır, yok edilir — group gerçekte nedir? | ✅ |
 | 5 | [Package management (apt)](#bölüm-5--package-management-apt) | `apt install` deyince gerçekte ne oluyor — repo'lar, GPG key'ler, binary'ler? | 🔜 |
@@ -125,7 +125,279 @@ Levent'e sor:
 
 # Bölüm 2 — systemd & systemctl
 
-> 🔜 Placeholder — systemd programları nasıl kontrol eder: unit'ler, target'lar, service lifecycle, unit file yazmak.
+Makine: Ubuntu 24.04 (AWS), hesap `ubuntu` (sudo).
+
+## Cheat sheet
+
+| Komut | Ne yapar |
+|---|---|
+| `ps -p 1 -o pid,comm` | PID 1'in kim olduğunu göster (systemd) |
+| `ps -ef --forest` | process ağacını girintili çiz, parent/child ilişkisini göster |
+| `ps -p <pid> -o pid,ppid` | bir process'in parent PID'ini göster |
+| `systemctl status <servis>` | durumu göster |
+| `sudo systemctl start <servis>` | şimdi başlat |
+| `sudo systemctl stop <servis>` | şimdi durdur |
+| `sudo systemctl restart <servis>` | durdur + tekrar başlat |
+| `sudo systemctl reload <servis>` | config'i process'i öldürmeden yeniden oku (destekleyen servislerde) |
+| `sudo systemctl enable <servis>` | boot'ta otomatik başlasın (symlink oluşturur) |
+| `sudo systemctl disable <servis>` | boot'ta otomatik başlamasın (symlink siler) |
+| `journalctl -u <servis> -n N` | son N log satırı |
+| `journalctl -u <servis> -f` | log'u canlı takip et |
+| `ls -la /etc/systemd/system/` | admin'in elle eklediği/enable ettiği unit'ler ve symlink'ler |
+
+## 2.1 — PID 1: systemd
+
+Kernel boot sırasında ilk çalıştırdığı process systemd; sistemdeki her diğer process (servisler, shell'in, SSH bağlantın) doğrudan ya da dolaylı olarak onun child'ı.
+
+```
+$ ps -p 1 -o pid,comm
+    PID COMMAND
+      1 systemd
+```
+
+| Flag | Anlamı |
+|---|---|
+| `-p` | PID'e göre filtrele |
+| `-o pid,comm` | sadece PID ve process ismini (command) göster |
+
+Pratik önemi: `systemctl` komutları çalışıyor çünkü systemd'ye konuşuyorsun; `kill -9 1` teorik olarak sistemi çökertir çünkü kökü öldürmüş olursun.
+
+## 2.2 — systemd bir daemon, systemctl bir client
+
+`systemd` (PID 1) arka planda sürekli çalışan bir daemon — servisleri başlatma/durdurma, unit dosyalarını okuma gibi asıl işi o yapar. `systemctl` ise kendisi işi yapmaz, systemd'ye "şunu yap" diye mesaj gönderir.
+
+Bu iletişim **D-Bus** üzerinden olur — Linux'ta process'lerin birbiriyle konuşması için kullanılan bir IPC (inter-process communication) sistemi. `systemctl` bir D-Bus mesajı gönderir, systemd (D-Bus üzerinde dinleyen taraf) bu mesajı alıp işler. Sadece systemd değil, NetworkManager, bluetooth stack'i gibi birçok Linux servisi de D-Bus kullanır.
+
+## 2.3 — Process ağacı: parent/child
+
+`ps -ef --forest` çıktıyı ağaç gibi çizer — girinti ve `└─` karakterleriyle hangi process'in hangisinin child'ı olduğunu gösterir. En üstte systemd (PID 1), altına doğru dallanarak diğer her şey.
+
+| Komut | Ne için |
+|---|---|
+| `ps -ef --forest \| grep sshd` | sadece sshd dalını filtrele |
+| `ps -ef --forest \| less` sonra `/sshd` | interaktif arama; `n` sonraki eşleşme, `q` çıkış |
+
+```
+systemd (PID 1)
+ └─ sshd listener (857, root)               — sürekli çalışan, bağlantı bekleyen ana sshd
+     ├─ sshd: ubuntu [priv] (858)            — pts/0 için privilege-separation process'i
+     │   └─ sshd: ubuntu@pts/0 (1003)        — ilk SSH oturumu
+     │       └─ -bash (1049)
+     └─ sshd: ubuntu [priv] (860)            — pts/1 (şu an kullanılan)
+         └─ sshd: ubuntu@pts/1 (1048)
+             └─ -bash (1058)
+                 ├─ ps -ef --forest (1144)
+                 └─ less (1145)
+```
+
+`ps -p <pid> -o pid,ppid` ile zinciri tek tek doğrulamak:
+
+| PID | PPID |
+|---|---|
+| 1058 | 1048 |
+| 1048 | 860 |
+| 860 | 857 |
+| 857 | 1 |
+| 1 | 0 |
+
+PID 1'in PPID'i 0 — yani kernel'in kendisi.
+
+## 2.4 — systemd unit dizinleri
+
+| Dizin | Öncelik | Kim yazar |
+|---|---|---|
+| `/etc/systemd/system/` | yüksek | sysadmin (elle eklenen/override edilen unit'ler, `enable` ile oluşan symlink'ler) |
+| `/run/systemd/system/` | orta | systemd/programlar (runtime'da oluşan geçici unit'ler, reboot'ta silinir) |
+| `/usr/lib/systemd/system/` (symlink: `/lib/systemd/system/`) | düşük | apt/dpkg (paketlerin kurduğu default unit dosyaları) |
+
+| Config/state dosyaları | Ne saklar |
+|---|---|
+| `/etc/systemd/*.conf` (`system.conf`, `journald.conf`, `logind.conf`...) | systemd'nin kendi davranış ayarları |
+| `/var/lib/systemd/` | systemd'nin durum/state dosyaları |
+| `/var/log/journal/` | journalctl loglarının durduğu yer (kalıcıysa) |
+
+## 2.5 — Dizin içini incelemek: symlink'ler
+
+```
+$ ls -la /etc/systemd/system/ /lib/systemd/system/ 2>&1 | head -30
+/etc/systemd/system/:
+lrwxrwxrwx  1 root root   38 Jun 10 10:16 chronyd.service -> /usr/lib/systemd/system/chrony.service
+drwxr-xr-x  2 root root 4096 Jun 10 10:10 cloud-config.target.wants
+lrwxrwxrwx  1 root root   44 Jun 10 10:11 dbus-org.freedesktop.ModemManager1.service -> /usr/lib/systemd/system/ModemManager.service
+lrwxrwxrwx  1 root root   48 Jun 10 10:08 dbus-org.freedesktop.resolve1.service -> /usr/lib/systemd/system/systemd-resolved.service
+drwxr-xr-x  2 root root 4096 Sep 20 20:50 multi-user.target.wants
+-rw-r--r--  1 root root  359 Jun 10 10:16 snap-amazon\x2dssm\x2dagent-13009.mount
+-rw-r--r--  1 root root  591 Sep 20 20:50 snap.amazon-ssm-agent.amazon-ssm-agent.service
+```
+
+| Girdi tipi | Örnek | Ne demek |
+|---|---|---|
+| symlink (`l` ile başlar) | `chronyd.service -> .../chrony.service` | biri `systemctl enable chronyd` demiş; `enable` dosyayı kopyalamaz, `/usr/lib/systemd/system/`'deki orijinale işaret eden bir symlink oluşturur |
+| `.wants`/`.requires` dizini | `multi-user.target.wants/` | "bu target çalıştığında şunlar da çalışsın" listesi — içi hep sadece symlink |
+| düz dosya (`-` ile başlar) | `snap-core22-2411.mount` | gerçek unit dosyası, genelde otomatik üretilmiş (snap paketleri) |
+
+Doğrulama:
+
+```
+$ ls -l /etc/systemd/system/chronyd.service
+lrwxrwxrwx 1 root root 38 Jun 10 10:16 /etc/systemd/system/chronyd.service -> /usr/lib/systemd/system/chrony.service
+$ ls -l /usr/lib/systemd/system/chrony.service
+-rw-r--r-- 1 root root 1923 Jul  2  2024 /usr/lib/systemd/system/chrony.service
+```
+
+## 2.6 — `.wants` mekanizması ve target'lar
+
+`multi-user.target` = sistemin "network açık, çoklu kullanıcı çalışabilir, grafik arayüz yok" durumuna ulaştığı, sunucularda kullanılan normal boot hedefi.
+
+| Kural | Açıklama |
+|---|---|
+| `.wants`/`.requires` içi | kesinlikle sadece symlink, hiç gerçek dosya olmaz |
+| Hangi target'a bağlı | unit dosyasının `[Install]` bölümündeki `WantedBy=<target>` satırına göre değişir; `enable` symlink'i o target'ın `.wants/` dizinine koyar |
+| Boot ile ilişkisi | systemd boot'ta bir default target'a (genelde `multi-user.target`) ulaşmaya çalışır, bu sırada o target'ın `.wants/` dizinindeki tüm servisleri başlatır |
+
+## 2.7 — Unit dosya yapısı
+
+```
+$ cat /lib/systemd/system/cron.service
+[Unit]
+Description=Regular background program processing daemon
+Documentation=man:cron(8)
+After=remote-fs.target nss-user-lookup.target
+
+[Service]
+EnvironmentFile=-/etc/default/cron
+ExecStart=/usr/sbin/cron -f -P $EXTRA_OPTS
+IgnoreSIGPIPE=false
+KillMode=process
+Restart=on-failure
+SyslogFacility=cron
+
+[Install]
+WantedBy=multi-user.target
+```
+
+| Bölüm | İçerik |
+|---|---|
+| `[Unit]` | kimlik ve bağımlılıklar — `Description=`, `After=`, `Before=`, `Requires=`, `Wants=` |
+| `[Service]` | tipe özel — `ExecStart=`, `ExecStop=`, `Restart=`, `Type=`, `User=` |
+| `[Install]` | enable edilince ne olsun, hangi target'a bağlansın — `WantedBy=`, `RequiredBy=`, `Alias=` |
+
+| Unit tipi | Ne temsil eder | Örnek |
+|---|---|---|
+| `.service` | bir process/daemon | `cron.service`, `nginx.service` |
+| `.mount` | bir dosya sistemi mount noktası | `boot-efi.mount` |
+| `.socket` | bir network/IPC socket — bağlantı gelince ilişkili servisi tetikler | `docker.socket` |
+| `.timer` | zamanlanmış görev, cron'a benzer | `apt-daily.timer` |
+| `.target` | bir grup unit'i temsil eden senkronizasyon noktası (gerçek process değil) | `multi-user.target` |
+
+### Case study: `logger-demo` servisi yazmak
+
+| Adım | Komut |
+|---|---|
+| script yaz | `sudo tee /usr/local/bin/logger-demo.sh > /dev/null << 'EOF' ... EOF` + `sudo chmod +x` |
+| unit file yaz | `sudo tee /etc/systemd/system/logger-demo.service > /dev/null << 'EOF' ... EOF` |
+| yüklendi mi kontrol | `systemctl status logger-demo` |
+| başlat | `sudo systemctl start logger-demo` |
+| durum kontrol | `systemctl status logger-demo` |
+| boot'ta başlasın | `sudo systemctl enable logger-demo` |
+| logları izle | `journalctl -u logger-demo -n 5` / `-f` |
+| durdur + devre dışı bırak | `sudo systemctl stop logger-demo` / `sudo systemctl disable logger-demo` |
+| reboot testi (disabled) | `sudo reboot` → `systemctl status logger-demo` |
+| reboot testi (enabled) | `sudo systemctl enable logger-demo` → `sudo reboot` → `systemctl status logger-demo` |
+
+Script:
+```bash
+#!/bin/bash
+counter=0
+while true; do
+  echo "$(date '+%Y-%m-%d %H:%M:%S') - heartbeat #$counter"
+  counter=$((counter + 1))
+  sleep 5
+done
+```
+
+Unit:
+```ini
+[Unit]
+Description=Demo heartbeat logger
+
+[Service]
+ExecStart=/usr/local/bin/logger-demo.sh
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target
+```
+
+Süreç:
+
+1. Unit dosyasını `/etc/systemd/system/`'e yazar yazmaz `systemctl status logger-demo` onu zaten tanıyor — ama `start` etmediğin için `inactive`:
+   ```
+   ○ logger-demo.service - Demo heartbeat logger
+        Loaded: loaded (/etc/systemd/system/logger-demo.service; disabled; preset: enabled)
+        Active: inactive (dead)
+   ```
+2. `sudo systemctl start logger-demo` sonrası çalışıyor, ama `Loaded` hâlâ `disabled` — **start ve enable birbirinden bağımsız iki adım**, start etmek boot'ta otomatik başlayacağı anlamına gelmiyor:
+   ```
+   ● logger-demo.service - Demo heartbeat logger
+        Loaded: loaded (/etc/systemd/system/logger-demo.service; disabled; preset: enabled)
+        Active: active (running) since Mon 2026-09-21 22:00:05 UTC; 9s ago
+      Main PID: 1901 (logger-demo.sh)
+         Tasks: 2 (limit: 265)
+        Memory: 856.0K (peak: 1.1M)
+           CPU: 12ms
+        CGroup: /system.slice/logger-demo.service
+                ├─1901 /bin/bash /usr/local/bin/logger-demo.sh
+                └─1907 sleep 5
+   ```
+   `ls /etc/systemd/system/multi-user.target.wants/ | grep logger` bu noktada **boş** döner — henüz `enable` edilmedi.
+3. `sudo systemctl enable logger-demo` iki şey yapar: `Loaded` karşısında `enabled` yazar, ve `.wants/` dizininde symlink oluşturur:
+   ```
+   $ sudo systemctl enable logger-demo
+   Created symlink /etc/systemd/system/multi-user.target.wants/logger-demo.service → /etc/systemd/system/logger-demo.service.
+   $ ls -la /etc/systemd/system/multi-user.target.wants/logger-demo.service
+   lrwxrwxrwx 1 root root 39 Sep 21 22:03 ... -> /etc/systemd/system/logger-demo.service
+   ```
+4. `journalctl -u logger-demo -n 5` servisin loglarını gösterir; `-f` canlı takip (`^C` ile çık):
+   ```
+   Sep 21 22:05:05 lev-k logger-demo.sh[1901]: 2026-09-21 22:05:05 - heartbeat #60
+   Sep 21 22:05:10 lev-k logger-demo.sh[1901]: 2026-09-21 22:05:10 - heartbeat #61
+   ```
+5. `stop` process'i `SIGTERM` ile öldürür (`code=killed, signal=TERM`), `disable` symlink'i siler:
+   ```
+   $ sudo systemctl disable logger-demo
+   Removed "/etc/systemd/system/multi-user.target.wants/logger-demo.service".
+   ```
+6. **Reboot test 1 (disabled):** `sudo reboot` öncesi `Loaded: disabled` / `Active: inactive`. Reboot sonrası aynı: hâlâ `disabled` / `inactive` — disabled bir servis reboot'ta kendiliğinden başlamıyor.
+7. **Reboot test 2 (enabled):** `sudo systemctl enable logger-demo` sonrası `.wants/` symlink'i tekrar oluşur, `Loaded: enabled` ama henüz `Active: inactive` (başlatılmadı). `sudo reboot` sonrası servis **yeni bir PID ile** otomatik çalışıyor:
+   ```
+   ● logger-demo.service - Demo heartbeat logger
+        Loaded: loaded (/etc/systemd/system/logger-demo.service; enabled; preset: enabled)
+        Active: active (running) since Mon 2026-09-21 22:15:36 UTC; 24s ago
+      Main PID: 525 (logger-demo.sh)
+   Sep 21 22:15:36 lev-k systemd[1]: Started logger-demo.service - Demo heartbeat logger.
+   ```
+   Process state reboot'ta hiç korunmaz (eski PID 1901 gitti, yeni PID 525); korunan tek şey `.wants/` dizinindeki symlink — yani "bu servis boot'ta başlasın" bilgisi.
+
+## Kubernetes ile ilişkisi
+
+- Bir Kubernetes node'unda `kubelet`, host üzerinde systemd tarafından yönetilen sıradan bir servis; `systemctl status kubelet` / `journalctl -u kubelet -f` bu bölümde öğrenilenle birebir aynı.
+- Container runtime (`containerd` ya da `CRI-O`) da ayrı bir systemd unit'i olarak çalışır — kubelet onunla CRI (Container Runtime Interface) üzerinden konuşur, systemd ikisini de ayrı ayrı ayakta tutar.
+- **cgroup driver**: hem kubelet hem runtime, container'ların resource limit'lerini (cgroup) yönetmek için ya `systemd` driver'ını ya da eski `cgroupfs` driver'ını kullanır. İkisi farklı driver kullanırsa aynı makinede iki ayrı cgroup yönetim otoritesi oluşur, node kararsızlaşabilir.
+- Bu yüzden kubelet ve runtime'ın **aynı** cgroup driver'ında olması zorunlu; systemd tabanlı dağıtımlarda (Ubuntu dahil) önerilen `systemd` driver'ıdır, çünkü systemd zaten sistemin tek cgroup manager'ı olarak çalışıyor.
+- OpenShift/RHEL CoreOS tarafında da aynı model geçerli: kubelet ve CRI-O yine systemd unit'leri olarak çalışır, node config'i (machine-config-operator) da bu unit dosyalarını günceller.
+
+## Notlar
+
+| Flag | Anlamı |
+|---|---|
+| `ps -p` | PID'e göre filtrele |
+| `ps -o pid,comm` / `pid,ppid` | sadece istenen kolonları göster |
+| `ps -ef --forest` | ağaç görünümü |
+
+- `start` ve `enable` bağımsız: `start` şimdi çalıştırır, `enable` boot'ta çalıştırır. Birini yapmak diğerini yapmaz.
+- `.wants`/`.requires` dizinlerinin içi hep sadece symlink; unit dosyasının kendisi `/etc/systemd/system/` ya da `/usr/lib/systemd/system/`'de durur.
+- Reboot test'i process state'in korunmadığını gösterdi (yeni PID); korunan tek şey enable durumu (symlink var mı yok mu).
 
 [↑ İçindekilere dön](#i̇çindekiler)
 
