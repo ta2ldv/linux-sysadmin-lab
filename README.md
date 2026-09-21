@@ -70,27 +70,105 @@ The longer-term goal behind this lab is virtualization and Kubernetes. Almost ev
 
 # Part 3 — Users & groups
 
-Machine: Ubuntu 24.04 (AWS), user `ubuntu`. Test user: `deneme`.
+Machine: Ubuntu 24.04 (AWS). Main account `ubuntu`, test account `deneme`, service account `myapp`.
 
-## 3.1 — Who am I?
+## Cheat sheet
+
+| Command | What it does |
+|---|---|
+| `id [user]` | UID, primary GID, supplementary groups |
+| `id -gn user` | primary group name only |
+| `sudo adduser X` | user + group + home + skel copy |
+| `sudo adduser --system --group --no-create-home X` | service account: UID<1000, nologin, no home |
+| `sudo deluser X` / `--remove-home` | delete user / also delete home |
+| `sudo deluser --system X` | delete service account (refuses without the flag) |
+| `sudo groupadd G` / `sudo groupdel G` | create / delete group |
+| `sudo usermod -aG G X` | **append** to supplementary group (without `-a` the list is replaced) |
+| `sudo gpasswd -a X G` / `-d X G` | add to / remove from supplementary group |
+| `sudo usermod -g G X` | change primary group (also moves files in home) |
+| `sudo usermod -s SHELL X` | change login shell (`/usr/sbin/nologin` = disable) |
+| `sudo usermod -e YYYY-MM-DD X` / `-e ''` | expire account on date / clear |
+| `sudo passwd -l X` / `-u X` | lock / unlock password |
+| `sudo chage -l X` / `-M 90 X` | list aging info / password lifetime 90 days |
+| `newgrp G` | activate group without re-login (opens inner shell) |
+| `su - X` / `su - X -c 'cmd'` | become X / run one command as X (X's password) |
+| `sudo -u X cmd` | run one command as X (your password, skips shell) |
+| `sudo visudo -f /etc/sudoers.d/X` | write a sudoers rule (syntax-checked) |
+| `sudo find / -uid N` / `-gid N 2>/dev/null` | find orphaned files |
+| `sudo chgrp G file` | change a file's group |
+| `cut -d: -f1 /etc/passwd` | all usernames |
+
+## 3.1 — Identity
 
 ```
 $ id
 uid=1000(ubuntu) gid=1000(ubuntu) groups=1000(ubuntu),4(adm),24(cdrom),27(sudo),30(dip),105(lxd)
 ```
 
-- Linux knows you by **UID**, not by name. 0 = root, 1–999 system accounts, 1000+ humans.
-- `gid` = primary group. Ubuntu creates a group with your name for every user.
-- `groups` = supplementary groups. Most privileges come from here:
-  - `sudo` → you can become root
-  - `adm` → you can read `/var/log`
-  - `lxd` → you can manage LXD containers (not Docker; Canonical's tool; effectively root)
+| Field | Meaning |
+|---|---|
+| `uid` | Linux knows you by this number, not by name. 0 root, 1–999 system, 1000+ humans |
+| `gid` | primary group. Files you create belong to it. Ubuntu gives every user a single-member group with their name |
+| `groups` | supplementary groups. Most privileges come from here |
 
-## 3.2 — Creating a user
+| Group | Grants |
+|---|---|
+| `sudo` | you can become root (the `%sudo` line in `/etc/sudoers`) |
+| `adm` | you can read `/var/log`, nothing else |
+| `lxd` | LXD container management (not Docker; Canonical's tool). Effectively root |
+| `cdrom`, `dip` | legacy hardware groups, meaningless |
+
+User and group work together: if you are the owner, your user decides; otherwise your group membership does. Admin habit is to manage via groups ("5 people should read logs" = add 5 users to `adm`).
+
+## 3.2 — The four files
+
+The whole user/group system is 4 text files. No database, no daemon. `adduser`, `usermod`, `gpasswd` are programs that edit them.
+
+| File | Holds | Readable by |
+|---|---|---|
+| `/etc/passwd` | user identity: name, UID, primary GID, home, shell | everyone |
+| `/etc/shadow` | user password hash + aging rules | root, `shadow` group |
+| `/etc/group` | group identity: name, GID, **supplementary** members | everyone |
+| `/etc/gshadow` | group password (practically always empty) | root |
+
+Identity is public because `ls -l` must map UID→name. The hash is private because it can be cracked offline.
+
+**`/etc/passwd`**
+
+```
+deneme : x : 1001 : 1001 : Jack Brown,31,n/a,n/a,n/a : /home/deneme : /bin/bash
+ name    pw   UID   GID            GECOS                  home         shell
+```
+
+`x` = password lives in shadow. Shell `nologin` = login disabled but account exists.
+
+**`/etc/shadow`**
+
+```
+deneme : $y$j9T$POUR... : 20716 : 0 : 99999 : 7 : : :
+ name        hash         last   min   max  warn inactive expire
+```
+
+| Value | Meaning |
+|---|---|
+| `$y$` | yescrypt hash. The password itself is stored nowhere |
+| leading `!` or `*` | locked. `ubuntu:!:...` → no password, logs in with SSH key |
+| `20716` | days since 1970 |
+| `99999` | never |
+
+**`/etc/group`**
+
+```
+adm : x : 4 : syslog,ubuntu,deneme
+name pw  GID   supplementary members
+```
+
+Primary members don't appear here; they're in the GID field of `passwd`. `deneme:x:1001:` empty = nobody is a supplementary member, but `deneme` is in it as primary.
+
+## 3.3 — Creating a user
 
 ```
 $ sudo adduser deneme
-info: Selecting UID/GID from range 1000 to 59999 ...
 info: Adding new group `deneme' (1001) ...
 info: Adding new user `deneme' (1001) with group `deneme (1001)' ...
 info: Creating home directory `/home/deneme' ...
@@ -98,84 +176,43 @@ info: Copying files from `/etc/skel' ...
 New password:
 ```
 
-`adduser` really does 5 things:
-
-| What | Where |
+| Step | Where |
 |---|---|
 | user line | `/etc/passwd` |
-| password hash | `/etc/shadow` |
-| same-named group | `/etc/group` |
-| home directory | `/home/deneme` (`drwxr-x---`, others can't enter) |
-| template files | `/etc/skel` → copied to home |
+| hash | `/etc/shadow` |
+| single-member group | `/etc/group` |
+| home | `/home/deneme`, `drwxr-x---` (others can't enter) |
+| template | `/etc/skel` → copied to home, ownership to the user |
 
-**`/etc/skel`** = skeleton. Contains `.bashrc`, `.profile`, `.bash_logout`. Anything you put here gets copied into every user created from now on.
+`/etc/skel` = skeleton: `.bashrc`, `.profile`, `.bash_logout`. Anything placed here goes into every future user.
 
-### `/etc/passwd` — the user list
-
-A user *is* a line in this file. No folder, one file.
+## 3.4 — `ls -l` format
 
 ```
-$ grep -E '^(ubuntu|deneme):' /etc/passwd
-ubuntu:x:1000:1000:Ubuntu:/home/ubuntu:/bin/bash
-deneme:x:1001:1001:Jack Brown,31,n/a,n/a,n/a:/home/deneme:/bin/bash
+-rw-r-----  1  syslog  adm  313512  Sep 20 22:00  /var/log/syslog
+   perms   links owner  group  size      date          name
 ```
 
-```
-deneme : x : 1001 : 1001 : Jack Brown,... : /home/deneme : /bin/bash
- name   pw   UID   GID      GECOS            home          shell
-```
+Permissions are 3 blocks: **owner / group / others** (`u`/`g`/`o`). First character is the type: `-` file, `d` directory, `l` symlink.
 
-`x` = "password isn't here, look in shadow". Set the shell to `/usr/sbin/nologin` and the user can't log in but still exists (service accounts work this way).
+| Block | For `syslog` | Who |
+|---|---|---|
+| `rw-` | read, write | owner `syslog` (rsyslog writes as this identity) |
+| `r--` | read | group `adm` |
+| `---` | nothing | others |
 
-### `/etc/shadow` — passwords
+`syslog` is a service account: `syslog:x:102:102::/nonexistent:/usr/sbin/nologin`. Writer and readers are separated.
 
-```
-$ sudo grep -E '^(ubuntu|deneme):' /etc/shadow
-ubuntu:!:20716:0:99999:7:::
-deneme:$y$j9T$POUR...:20716:0:99999:7:::
-```
+## 3.5 — Privilege through groups
 
-- `$y$` = yescrypt hash. The password itself is stored nowhere.
-- `!` = password **locked**. `ubuntu` has no password; it logs in with an SSH key.
-- Remaining fields: last change (days since epoch), min days, max days, warning.
-
-Why `sudo` was needed:
-
-```
-$ ls -l /etc/passwd /etc/shadow
--rw-r--r-- 1 root root   1918 /etc/passwd
--rw-r----- 1 root shadow  999 /etc/shadow
-```
-
-`passwd` is world-readable (`ls` reads it to map UID → name). `shadow` is readable only by root and the `shadow` group.
-
-## 3.3 — Granting privilege through groups
-
-Can `deneme` read logs?
+`deneme` is not in `adm` → others → `---`:
 
 ```
 $ su - deneme -c 'head -3 /var/log/syslog'
 cat: /var/log/syslog: Permission denied
-
-$ ls -l /var/log/syslog
--rw-r----- 1 syslog adm 313137 /var/log/syslog
 ```
 
-`ls -l` format:
-
-```
--rw-r-----  1  syslog  adm  313137  Sep 20 22:00  /var/log/syslog
-   perms   links owner  group  size      date          name
-```
-
-Permissions are 3 blocks: **owner / group / others** (`u`/`g`/`o`).
-- `rw-` owner (`syslog`): read, write
-- `r--` group (`adm`): read
-- `---` others: nothing
-
-`syslog` is a service account (`syslog:x:102:102::/nonexistent:/usr/sbin/nologin`). rsyslog runs as this identity and writes the log. Read access goes to the `adm` group. Writer and readers are separated.
-
-`deneme` is not the owner, not in `adm` → others → `---`. Fix: add to the group.
+Don't touch the file; add the user to the group:
 
 ```
 $ sudo usermod -aG adm deneme
@@ -183,20 +220,30 @@ $ su - deneme -c 'head -3 /var/log/syslog'
 2026-09-20T18:21:48.060807+00:00 ip-172-31-78-215 kernel: Linux version 6.17.0-1017-aws ...
 ```
 
-We never touched the file. We only changed the user's group membership.
+| Task | `usermod` | `gpasswd` |
+|---|---|---|
+| add | `sudo usermod -aG adm deneme` | `sudo gpasswd -a deneme adm` |
+| remove | `sudo usermod -G users,gizli deneme` (rewrite the whole list) | `sudo gpasswd -d deneme adm` |
+| order | flag → group → user | flag → user → group |
+| danger | forget `-a` and the list is replaced | none |
 
-> ⚠️ `usermod -G` on its own **replaces** the supplementary group list. Always use `-aG` (append).
+⚠️ Group changes don't affect open sessions; re-login or `newgrp` (3.9).
 
-> ⚠️ Group changes don't affect open sessions; log out and back in.
+**`su` vs `sudo`**
 
-**`su` notes:**
-- `su - deneme` → become `deneme`. `-` = login shell: rebuild their environment from scratch (home, `$PATH`, `.profile`). Don't use it without the dash.
-- `-c 'cmd'` → don't open a shell, run the command and exit.
-- `su` asks for the **target** user's password; `sudo` asks for **yours** and consults sudoers.
+| | `sudo` | `su` |
+|---|---|---|
+| does | run one command as someone else | open a shell as someone else |
+| password | yours | the target's |
+| permission | sudoers | knowing the target's password |
+| restrictable | yes, per command | no |
+| target is `nologin` | works (skips the shell) | fails |
 
-## 3.4 — Who may run a program?
+`su - X`: `-` = login shell, rebuild X's environment from scratch. Don't use it without the dash. `-c 'cmd'` = no shell, run the command and exit.
 
-### Way 1: The program runs with user privileges → group + `chmod 750`
+## 3.6 — Who may run a program
+
+**Way 1: program runs with user privileges → file group + `chmod 750`**
 
 ```
 $ sudo groupadd gizli
@@ -207,87 +254,307 @@ $ ls -l /usr/local/bin/gizli-program
 -rwxr-x--- 1 root gizli 57 /usr/local/bin/gizli-program
 ```
 
-Test:
-
-```
-$ gizli-program
--bash: /usr/local/bin/gizli-program: Permission denied      # ubuntu, not in gizli
-
-$ sudo gizli-program
-gizli program calisti, ben: root                             # permissions don't apply to root
-
-$ su - deneme -c 'gizli-program'
--bash: line 1: /usr/local/bin/gizli-program: Permission denied
-
-$ sudo usermod -aG gizli deneme
-$ su - deneme -c 'gizli-program'
-gizli program calisti, ben: deneme
-```
+| Who | Result | Why |
+|---|---|---|
+| `ubuntu` | denied | not in `gizli` |
+| `sudo` | `ben: root` | permissions don't apply to root |
+| `deneme` | denied | not in `gizli` |
+| `deneme` (after `usermod -aG gizli`) | `ben: deneme` | joined the group |
 
 Same mechanism as the log file, `x` instead of `r`.
 
-### Way 2: The program needs root → per-command permission in sudoers
-
-`deneme` can't become root:
+**Way 2: program needs root → per-command rule in sudoers**
 
 ```
 deneme@lev-k:~$ sudo cat /etc/shadow
 deneme is not in the sudoers file.
 ```
 
-Let them run only this one command as root. Use `visudo` (it syntax-checks and refuses to save a broken file; otherwise `sudo` locks up entirely):
-
 ```
 $ sudo visudo -f /etc/sudoers.d/deneme
 ```
-
-One line inside:
-
 ```
 deneme  ALL=(root)  /usr/bin/cat /etc/shadow
 ```
 
 Read it as a sentence: **WHO, WHERE = (AS WHOM) WHAT**. `ALL` = any host; the format requires it.
 
-Test:
-
 ```
 deneme@lev-k:~$ sudo cat /etc/shadow
-root:*:20614:0:99999:7:::
-...                                                          # works
-
+root:*:20614:0:99999:7:::                    # works
 deneme@lev-k:~$ sudo cat /etc/passwd
 Sorry, user deneme is not allowed to execute '/usr/bin/cat /etc/passwd' as root on lev-k.
 ```
 
-Same `cat`, different argument, denied. sudoers matches the command **together with its arguments**.
+Same `cat`, different argument, denied. sudoers matches the command **with its arguments**.
 
-**How sudoers works:**
-- One source: `/etc/sudoers`. Its last line is `@includedir /etc/sudoers.d` → files in that folder are appended to the same list. The folder is just for tidiness.
-- The reader is the `sudo` command itself, from scratch on every run. No service, no daemon.
-- `%sudo ALL=(ALL:ALL) ALL` → `%` = group. Ubuntu's `sudo` group gets its power from this line.
-- On this machine `ubuntu`'s power actually comes from a file written by cloud-init:
+| sudoers | Note |
+|---|---|
+| `/etc/sudoers` | main file, last line `@includedir /etc/sudoers.d` |
+| `/etc/sudoers.d/*` | extras, appended to the same list. Just for tidiness |
+| `visudo` | locks, syntax-checks, refuses to save a broken file. Broken sudoers = `sudo` locks up |
+| `%sudo ALL=(ALL:ALL) ALL` | `%` = group. Ubuntu's `sudo` group gets its power here |
+| `ubuntu ALL=(ALL) NOPASSWD:ALL` | written by cloud-init, `/etc/sudoers.d/90-cloud-init-users`. Why no password prompt |
+| reader | the `sudo` command itself, every run. No daemon |
+
+## 3.7 — Deleting groups and orphaned GIDs
 
 ```
-$ sudo cat /etc/sudoers.d/90-cloud-init-users
-ubuntu ALL=(ALL) NOPASSWD:ALL
+$ sudo gpasswd -d deneme adm
+Removing user deneme from group adm
+$ sudo groupdel gizli                          # supplementary members drop automatically; refuses if it's someone's primary
+$ ls -l /usr/local/bin/gizli-program
+-rwxr-x--- 1 root 1002 57 /usr/local/bin/gizli-program
 ```
 
-`NOPASSWD` → no password prompt. That's why `sudo` never asked for one.
+Group gone, file still has GID 1002, `ls` can't map it to a name. Danger: a new group that gets 1002 inherits the file.
 
-### `sudo` vs `su`
+```
+$ sudo find / -gid 1002 2>/dev/null
+/usr/local/bin/gizli-program
+$ sudo chgrp root /usr/local/bin/gizli-program
+```
 
-| | `sudo` | `su` |
+`2>/dev/null` = swallow stderr (`find` chases its own tail in `/proc`, noise). Right order: **`find` first, then `groupdel`/`deluser`**.
+
+## 3.8 — Primary group
+
+One job: the group of files you create. Supplementary = "where can I reach", primary = "what I create belongs to whom".
+
+```
+$ sudo usermod -g gizli deneme                 # lowercase -g = primary
+$ grep '^deneme:' /etc/passwd
+deneme:x:1001:1002:...                         # GID 1001 → 1002
+```
+
+⚠️ `usermod -g` also moves files **in home** owned by the old primary group to the new one. Doesn't touch anything outside home. Revert: `sudo usermod -g deneme deneme`.
+
+Umask note: if primary group name = username, umask is `002` (`-rw-rw-r--`), otherwise `022` (`-rw-r--r--`). Part 8.
+
+## 3.9 — `newgrp`: group without re-login
+
+The shell copies the group list **at login**. `usermod` changes the file, not the open shell:
+
+```
+deneme@lev-k:~$ cat /etc/group | grep gizli
+gizli:x:1002:deneme                            # member in the file
+deneme@lev-k:~$ id
+uid=1001(deneme) gid=1001(deneme) groups=1001(deneme),100(users)   # not in the shell
+deneme@lev-k:~$ gizli-program
+-bash: /usr/local/bin/gizli-program: Permission denied
+```
+
+```
+deneme@lev-k:~$ newgrp gizli
+deneme@lev-k:~$ gizli-program
+gizli program calisti, ben: deneme
+deneme@lev-k:~$ id
+uid=1001(deneme) gid=1002(gizli) groups=1002(gizli),100(users),1001(deneme)
+```
+
+| `newgrp G` | |
+|---|---|
+| does | opens an inner shell (`$SHLVL` 1→2), adds G **and makes it primary** |
+| requires | membership in `/etc/group`; otherwise asks for a group password (none) → denied |
+| permanent | no, `exit` returns to the old shell |
+| `sg G -c 'cmd'` | one command without opening a shell |
+
+```
+deneme@lev-k:~$ touch test1.txt               # inner shell → group gizli
+deneme@lev-k:~$ exit
+deneme@lev-k:~$ touch test2.txt               # outer shell → group deneme
+-rw-rw-r-- 1 deneme gizli  0 test1.txt
+-rw-rw-r-- 1 deneme deneme 0 test2.txt
+```
+
+Process tree:
+```
+su (root) → -bash (deneme, login) → newgrp → bash (deneme, gizli active)
+```
+
+## 3.10 — Restricting users
+
+Cut access without deleting. Each one changes a field in `passwd`/`shadow`.
+
+| Command | Blocks | Still open | Scenario |
+|---|---|---|---|
+| `passwd -l X` | password login (`!` before hash) | SSH key, cron, running processes | leave, temporary suspension |
+| `usermod -s /usr/sbin/nologin X` | every interactive login | cron, running processes | permanent shutdown, service accounts |
+| `usermod -e 2026-12-31 X` | everything after the date | everything until then | intern, temporary access |
+| `chage -M 90 X` | forces password change after 90 days | everything | password policy |
+
+| Revert | |
+|---|---|
+| `passwd -u X` | unlock, old password works |
+| `usermod -s /bin/bash X` | restore shell |
+| `usermod -e '' X` | clear expiry |
+| `chage -l X` | show all aging info, human-readable |
+
+Error messages differ and tell you where it stopped:
+
+```
+$ su - deneme                                  # after passwd -l
+su: Authentication failure                     # password stage
+$ su - deneme                                  # after nologin
+This account is currently not available.       # shell stage
+$ su - deneme                                  # after usermod -e 2026-01-01
+Your account has expired; please contact your system administrator.
+```
+
+The shell field can be any program (kiosk menu, `git-shell`, `rrsync`):
+
+```
+$ printf '#!/bin/bash\necho "Buraya giris yok canim :)"\n' | sudo tee /usr/local/bin/giris-yok
+$ sudo chmod 755 /usr/local/bin/giris-yok
+$ sudo usermod -s /usr/local/bin/giris-yok deneme
+$ su - deneme
+Password:
+Buraya giris yok canim :)
+```
+
+## 3.11 — Service accounts
+
+Don't run applications as root; if hacked, the attacker is root. Give the app its own user that can't log in and has no home. `syslog`, `sshd`, `www-data` are like this. Kubernetes `runAsUser` is the same idea.
+
+```
+$ sudo adduser --system --group --no-create-home myapp
+$ grep -E '^(syslog|myapp):' /etc/passwd
+syslog:x:102:102::/nonexistent:/usr/sbin/nologin
+myapp:x:111:113::/nonexistent:/usr/sbin/nologin
+```
+
+| Flag | Does |
+|---|---|
+| `--system` | UID 100–999, shell `nologin`, no password or GECOS prompts |
+| `--group` | same-named group, make it primary (otherwise `nogroup`) |
+| `--no-create-home` | no `/home/myapp`; working dir becomes `/var/lib/myapp` |
+| `--uid 5000` | overrides the range; breaks the "below 1000 = service" convention, avoid unless needed |
+
+The UID range is convention, not a kernel limit (OpenShift uses 1000000000+). Using it: no login, no password, `su` fails → `sudo -u myapp cmd` or systemd `User=myapp`.
+
+```
+$ sudo -u myapp whoami
+myapp
+$ sudo -u myapp gizli-program
+sudo: unable to execute /usr/local/bin/gizli-program: Permission denied    # zero privilege, correct start
+```
+
+### Case study: the `myapp` service
+
+Goal: a script writes the date to `/var/lib/myapp/log.txt` every second, systemd runs it as `myapp`, everyone can read, nobody can write, only `myapp` can execute the script.
+
+| Step | Command |
+|---|---|
+| account | `sudo adduser --system --group --no-create-home myapp` |
+| directory | `sudo mkdir /var/lib/myapp && sudo chown myapp:myapp /var/lib/myapp && sudo chmod 755 /var/lib/myapp` |
+| script | `sudo nano /usr/local/bin/myapp-logger` |
+| ownership | `sudo chown myapp:myapp /usr/local/bin/myapp-logger && sudo chmod 700 /usr/local/bin/myapp-logger` |
+| manual test | `sudo -u myapp timeout 25 /usr/local/bin/myapp-logger` |
+| unit | `sudo nano /etc/systemd/system/myapp.service` |
+| start | `sudo systemctl daemon-reload && sudo systemctl start myapp` |
+| check | `systemctl status myapp`, `ps -o user,pid,cmd -C myapp-logger` |
+| watch | `tail -f /var/lib/myapp/log.txt` |
+
+Script:
+```bash
+#!/bin/bash
+while true; do
+  date >> /var/lib/myapp/log.txt
+  sleep 1
+done
+```
+
+Unit:
+```ini
+[Unit]
+Description=myapp logger
+
+[Service]
+User=myapp
+ExecStart=/usr/local/bin/myapp-logger
+Restart=always
+
+[Install]
+WantedBy=multi-user.target
+```
+
+| systemd | Meaning |
+|---|---|
+| `User=myapp` | the service runs as this identity |
+| `Restart=always` | restart on crash; `systemctl stop` doesn't count |
+| `[Install] WantedBy=` | when to start at boot, used by `enable` |
+| `daemon-reload` | re-read unit files; doesn't touch running services. After every unit edit |
+| `start` / `stop` / `restart` | start now / stop / stop+start |
+| `enable` / `enable --now` | start at boot / + start now too |
+
+Process:
+
+1. `chmod 700` + `chown myapp` → `ubuntu` can't run it: `Permission denied`. Root can; permissions don't apply to root.
+2. Manual test: `timeout 25` kills the infinite loop after 25 s, the terminal doesn't hang.
+3. `deneme` reads, can't write:
+   ```
+   deneme@lev-k:~$ tail -f /var/lib/myapp/log.txt
+   Mon Sep 21 12:43:47 UTC 2026
+   deneme@lev-k:~$ echo hack >> /var/lib/myapp/log.txt
+   -bash: /var/lib/myapp/log.txt: Permission denied
+   ```
+4. The service runs as `myapp`:
+   ```
+   $ ps -o user,pid,cmd -C myapp-logger
+   USER         PID CMD
+   myapp       3395 /bin/bash /usr/local/bin/myapp-logger
+   ```
+5. `systemctl stop` without `sudo` → polkit asks for `ubuntu`'s password, there is none, denied. With `sudo` it consults sudoers and passes.
+
+Cleanup: `stop` → `rm unit` → `daemon-reload` → `deluser --system myapp` → `rm -rf /var/lib/myapp` → `rm script`.
+
+## 3.12 — Deleting a user
+
+| Command | Home | Other files |
 |---|---|---|
-| What it does | Run one command as someone else | Open a shell as someone else |
-| Whose password | Yours | The target's |
-| Where permission comes from | sudoers | Knowing the target's password |
-| Restrictable? | Yes, per command | No |
+| `sudo deluser X` | kept | untouched |
+| `sudo deluser --remove-home X` | deleted | untouched |
 
-## Skipped
+Files elsewhere are orphaned by UID; a new user that gets the same UID inherits them.
 
-- **Disk quota** — off by default on Ubuntu; meant for multi-user shared systems. Revisit when needed.
-- Why `tee` instead of `>` — `sudo echo > file` fails because the shell does the `>` with *your* privileges; `tee` is a program, so `sudo` runs it as root. To be covered separately.
+```
+$ sudo -u deneme touch /tmp/deneme-dosyasi
+$ sudo deluser --remove-home deneme
+userdel: user deneme is currently used by process 3793
+```
+
+A user with a running process can't be deleted. `ps -o user,pid,cmd -p 3793` → `deneme -bash`. Interactive bash ignores SIGTERM (so you don't lose work by accident); `kill -9` is needed:
+
+```
+$ sudo kill -9 3793
+$ sudo deluser --remove-home deneme
+$ ls -l /tmp/deneme-dosyasi
+-rw-rw-r-- 1 1001 1001 0 /tmp/deneme-dosyasi       # no name, just the UID
+$ sudo find / -uid 1001 2>/dev/null
+/tmp/deneme-dosyasi
+```
+
+Right order: **`find -uid` → delete/`chown` → `deluser`**.
+
+## Notes
+
+**`usermod` flags** (user modify, from the `passwd` package on Ubuntu):
+
+| Flag | Word | Field |
+|---|---|---|
+| `-s` | shell | passwd 7 |
+| `-g` | group | passwd 4 (primary) |
+| `-aG` | append groups | `/etc/group` |
+| `-e` | expire | shadow 8 |
+| `-d` | directory | passwd 6 |
+| `-l` | login | passwd 1 (rename) |
+| `-L` / `-U` | lock / unlock | = `passwd -l/-u` |
+
+**`sudo` and `>`:** `sudo echo x > /root/f` fails; the shell performs `>` with *your* privileges, `sudo` only applies to `echo`. `tee` is a program, so `sudo` runs it as root: `echo x | sudo tee /root/f`. Same reason `sudo rm /home/deneme/test*.txt` fails (your shell expands `*` and can't enter the directory): `sudo sh -c 'rm /home/deneme/test*.txt'`.
+
+**`/run/sudo/ts/UID`:** `sudo`'s 15-minute "don't ask again" memory. `sudo -k` resets it.
+
+**Skipped:** disk quota (off on Ubuntu; for multi-user shared systems).
 
 [↑ Go back to TOC](#table-of-contents)
 
