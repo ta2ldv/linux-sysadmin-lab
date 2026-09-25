@@ -34,7 +34,7 @@ The longer-term goal behind this lab is virtualization and Kubernetes. Almost ev
 | 0 | [Linux filesystem layout](#part-0--linux-filesystem-layout) | What lives where in the directory tree — what are /etc, /var, /usr, /bin for? | ✅ |
 | 1 | [Everything is a file](#part-1--everything-is-a-file) | What is a file, a file descriptor, a socket — and why is *everything* one? | ⏳ |
 | 2 | [systemd & systemctl](#part-2--systemd--systemctl) | How does systemd control every program on the machine? | ✅ |
-| 3 | [Logging & journalctl](#part-3--logging--journalctl) | Where do logs live, and how do I interrogate the journal? | 🔜 |
+| 3 | [Logging & journalctl](#part-3--logging--journalctl) | Where do logs live, and how do I interrogate the journal? | ✅ |
 | 4 | [Users & groups](#part-4--users--groups) | How do I create, restrict and destroy users — and what is a group really? | ✅ |
 | 5 | [Package management (apt)](#part-5--package-management-apt) | What actually happens on `apt install` — repos, GPG keys, binaries? | 🔜 |
 | 6 | [Process management](#part-6--process-management) | What is a process, a signal — and what really separates SIGTERM from SIGKILL? | 🔜 |
@@ -107,9 +107,6 @@ All three are **virtual** filesystems. They show up in `df -h` but use no disk s
 - Almost everything under `/etc` is text config, not binary — not a hard rule, just the near-universal convention.
 - `/usr` is apt-managed territory: everything you `apt install` lands here, hands off otherwise.
 - Service accounts' home is usually `/nonexistent` or `/var/lib/<service>`, not under `/home` (see Part 4).
-
-Ask Levent:
-- Whether `/tmp` on this machine is actually mounted as tmpfs (RAM) or lives on disk — not verified with `mount | grep /tmp`.
 
 [↑ Go back to TOC](#table-of-contents)
 
@@ -405,7 +402,350 @@ Process:
 
 # Part 3 — Logging & journalctl
 
-> 🔜 Placeholder — the journal, filtering by unit/time/priority, rsyslog, log rotation.
+Machine: Ubuntu 24.04 (AWS), account `ubuntu` (in the `adm` group — that's where read access to journalctl/`/var/log` comes from).
+
+## Cheat sheet
+
+| Command | What it does |
+|---|---|
+| `logger "msg"` | send a test message (classic `syslog()` call, via `/dev/log`) |
+| `logger -p crit "msg"` | send with a given priority (`crit`+ messages trigger an immediate fsync in journald) |
+| `logger -u <socket> "msg"` | write directly to a Unix socket instead of `/dev/log` |
+| `journalctl -u <unit>` | show logs for a given unit |
+| `journalctl -u <unit> -n N` | last N lines |
+| `journalctl --since ... --until ...` | filter by time range |
+| `journalctl -p <sev>` / `-p a..b` | filter by severity (single value or range, both ends inclusive) |
+| `journalctl -f` | follow live |
+| `journalctl -b [-N]` | logs for a specific boot (`-1` = the previous boot) |
+| `journalctl --file=<path>` | read a specific journal file directly |
+| `journalctl --flush` | move logs from RAM (`/run/log/journal`) to disk (`/var/log/journal`) |
+| `journalctl --relinquish-var` | let go of the disk, new writes go to RAM |
+| `journalctl --sync` | force fsync on all open journal files right now |
+| `systemd-analyze cat-config systemd/journald.conf` | show the merged/effective config across all layers |
+| `systemctl is-active rsyslog` | is rsyslog running |
+| `strace -f -e trace=fsync,fdatasync -p $(pidof systemd-journald)` | watch live when journald actually calls fsync |
+
+## 3.1 — Architecture: entry points → journald → file (+ syslog mirror)
+
+### Diagram 1 — basic flow: sources → journald → storage
+
+![journald architecture - level 1](misc/journald_architecture_mermaid.png)
+
+The simplest picture: the entry points (kernel ring buffer, syslog(), native API, systemd stdout/stderr, kernel audit) are collected by journald, written to persistent (disk) or volatile (RAM) storage, and forwarded to syslog/kmsg/console/wall if configured. No mechanism detail yet, just the flow.
+
+### Diagram 2 — + rate limiting, mmap, forward destination detail
+
+![journald architecture - level 2](misc/journald_architecture_mermaid_2.png)
+
+Added on top of the previous diagram: journald applying filters/rate limiting to messages, accessing the journal file via `mmap`, and the forward destination spelled out — rsyslog is now its own box writing to its actual files (`/var/log/syslog`, `/var/log/auth.log`, `/var/log/kern.log`).
+
+### Diagram 3 — comprehensive: config layers, durability, rotation, the RAM distinction
+
+![journald architecture - level 3](misc/journald_architecture_mermaid_3.png)
+
+The most complete picture. Added on top: the config file layers (`journald.conf` + drop-ins), all four `Storage=` values, the return to RAM at shutdown via `--smart-relinquish-var`, the durability chain (kernel writeback → `SyncIntervalSec` → immediate sync on CRIT+ messages), rotation/retention settings, and the most critical point: the volatile journal in RAM (tmpfs, `/run/log/journal`) is NOT the same thing as the persistent file's page cache in RAM.
+
+| `Storage=` value | What happens |
+|---|---|
+| `persistent` | created if disk isn't there, always written to disk |
+| `auto` (default) | disk if `/var/log/journal` exists, RAM otherwise |
+| `volatile` | always RAM (tmpfs), lost on reboot |
+| `none` | nothing written to a journal file at all, only forwarding works |
+
+| Critical distinction | Meaning |
+|---|---|
+| `--flush` vs `--sync` | flush: moves the volatile journal to the persistent journal; sync: wait for already-written records to hit disk (fsync) |
+| `SyncIntervalSec` | doesn't mean "every record sits in RAM for this long" — kernel writeback can flush it earlier |
+| append-based ≠ append-only | records are written by appending, but the file header and indexes can still be updated |
+
+A message can enter journald through 4 different gates: the kernel ring buffer (`/dev/kmsg`), the classic `syslog()` call (`/dev/log`), the native `sd_journal_send()` socket, and units' stdout/stderr. All of it is collected by journald, trusted fields are added (`_PID`, `_UID`, `_COMM`, `_SYSTEMD_UNIT`... — a client can't forge these), and it's written to journald's own binary `*.journal` file. If `ForwardToSyslog=yes` is set, a copy of the same message also goes to rsyslog.
+
+```
+logger "msg"
+   │ (syslog() call, via /dev/log)
+   ▼
+systemd-journald ──────────► *.journal (binary)
+   │
+   │ (ForwardToSyslog=yes)
+   ▼
+/run/systemd/journal/syslog (socket)
+   │
+   ▼
+rsyslog ───────────────────► /var/log/syslog (text)
+```
+
+Test: does a single `logger` command show up in two different systems, in two different formats (binary vs text)?
+
+```
+$ logger "Naber journalctl!"
+$ journalctl -n 3
+Sep 24 20:38:20 lev-k ubuntu[1202]: Naber journalctl!
+$ systemctl is-active rsyslog
+active
+$ sudo tail -3 /var/log/syslog
+2026-09-24T20:40:08.081218+00:00 lev-k ubuntu: Naber journalctl!
+```
+
+The same message showed up on both sides. Source drop-in:
+
+```
+$ cat /usr/lib/systemd/journald.conf.d/syslog.conf
+[Journal]
+ForwardToSyslog=yes
+```
+
+To verify the direction, we tried skipping journald entirely and writing straight to the socket rsyslog listens on:
+
+```
+$ echo "<13>socat test mesaji" | socat - UNIX-SENDTO:/run/systemd/journal/syslog
+$ logger -u /run/systemd/journal/syslog "logger ile direkt socket testi"
+$ tail -f /var/log/syslog
+2026-09-24T20:56:12.871346+00:00 lev-k socat test mesaji
+2026-09-24T20:57:41.352612+00:00 lev-k ubuntu: logger ile direkt socket testi
+$ journalctl | grep -E "socat test|direkt socket testi"
+                                            # (empty — no match at all)
+```
+
+| Method | Shows in journalctl | Shows in syslog | Why |
+|---|---|---|---|
+| `logger` (normal, `/dev/log`) | yes | yes (via forwarding) | goes through journald first |
+| writing directly to the socket (`socat`/`logger -u`) | no | yes | skips journald entirely, lands straight on the socket rsyslog listens to |
+
+This is the first proof that journald and rsyslog are two independent systems — one doesn't quietly run behind the other, there's only a one-way copy relationship between them.
+
+## 3.2 — File inventory and config layers
+
+Where journald's files/directories actually live (disk vs RAM), and where you need to write when you want to change a setting.
+
+| Path | What | Persistent |
+|---|---|---|
+| `/usr/lib/systemd/systemd-journald` | daemon binary | disk |
+| `/usr/bin/journalctl` | client — reads files directly, doesn't ask the daemon | disk |
+| `/etc/systemd/journald.conf` | admin main config | disk |
+| `/etc/systemd/journald.conf.d/*.conf` | admin drop-in | disk |
+| `/run/systemd/journald.conf.d/*.conf` | runtime drop-in | RAM |
+| `/usr/lib/systemd/journald.conf.d/*.conf` (`syslog.conf`) | vendor drop-in | disk |
+| `/var/log/journal/<machine-id>/` | persistent log data | disk |
+| `/run/log/journal/<machine-id>/` | volatile log data | RAM (tmpfs) |
+| `/run/systemd/journal/{dev-log,socket,stdout,syslog}` | AF_UNIX sockets | RAM |
+
+Config layer priority: the main file is read first, then all drop-ins in alphabetical order; if the same drop-in name exists in multiple layers, **`/etc` beats `/run` beats `/usr/lib`**.
+
+```
+$ systemd-analyze cat-config systemd/journald.conf
+# /etc/systemd/journald.conf
+...
+[Journal]
+ForwardToSyslog=yes
+```
+
+`ForwardToSyslog`'s compile-time default is `no` (the `#ForwardToSyslog=no` line in the main file is a comment, has no effect); the effective `yes` comes from the vendor drop-in (`/usr/lib/.../syslog.conf`) — Ubuntu's deliberate choice for compatibility with the old syslog pipeline.
+
+We wrote our own drop-in and verified it:
+
+```
+$ printf '[Journal]\nCompress=no\n' | sudo tee /etc/systemd/journald.conf.d/99-lab.conf
+$ sudo systemctl restart systemd-journald
+$ systemd-analyze cat-config systemd/journald.conf | tail -n 10
+# /etc/systemd/journald.conf.d/99-lab.conf
+[Journal]
+Compress=no
+
+# /usr/lib/systemd/journald.conf.d/syslog.conf
+[Journal]
+ForwardToSyslog=yes
+```
+
+Both drop-ins side by side, both effective — as long as keys don't collide, layers merge; the priority rule only kicks in when the same key is defined in more than one place.
+
+Cleanup: `sudo rm /etc/systemd/journald.conf.d/99-lab.conf && sudo systemctl restart systemd-journald && sudo rmdir /etc/systemd/journald.conf.d/`
+
+## 3.3 — Storage= and the flush flow (RAM ↔ disk)
+
+`Storage=` decides where journald writes: `auto` (Ubuntu's default) = `/var/log/journal` if it exists (behaves like persistent, doesn't create the directory itself); `volatile` = `/run/log/journal` only (RAM), gone on reboot; `none` = don't write at all, just forward.
+
+| Directory | Storage | Mount source |
+|---|---|---|
+| `/var/log/journal/<machine-id>/` | Disk | `/dev/root` |
+| `/run/log/journal/<machine-id>/` | RAM | `tmpfs` |
+
+```
+$ df -h /var /run
+Filesystem      Size  Used Avail Use% Mounted on
+/dev/root        19G  2.8G   16G  15% /
+tmpfs            83M  2.0M   82M   3% /run
+```
+
+Test: write a `Storage=volatile` drop-in and restart, compare before/after reboot:
+
+```
+$ printf '[Journal]\nStorage=volatile\n' | sudo tee /etc/systemd/journald.conf.d/99-lab.conf
+$ sudo systemctl restart systemd-journald
+$ logger "volatile reboot testi"
+$ journalctl | grep "volatile reboot testi"
+Sep 25 14:06:37 lev-k ubuntu[7508]: volatile reboot testi
+$ grep "volatile reboot testi" /var/log/syslog
+2026-09-25T14:06:37.908970+00:00 lev-k ubuntu: volatile reboot testi
+
+$ sudo reboot
+```
+
+After reboot:
+
+```
+$ journalctl | grep "volatile reboot testi"
+                                            # (empty)
+$ grep "volatile reboot testi" /var/log/syslog
+2026-09-25T14:06:37.908970+00:00 lev-k ubuntu: volatile reboot testi
+```
+
+With `Storage=volatile`, the journal lives in RAM (`/run/log/journal`) and resets on reboot — the message is gone from journalctl. `/var/log/syslog` was unaffected, because rsyslog writes to its own independent text file and has no idea what journald's Storage setting is.
+
+`--flush` and `--relinquish-var` switch between these two modes **live, without a restart**:
+
+| Flag | Direction | What it does |
+|---|---|---|
+| `--flush` | RAM → Disk | moves accumulated logs from `/run/log/journal` to `/var/log/journal`, subsequent writes go to disk |
+| `--relinquish-var` | Disk → RAM | lets go of the disk, subsequent writes go to RAM (old records on disk aren't deleted) |
+
+Live switching test (first reverted to a clean `persistent` state: `sudo rm /etc/systemd/journald.conf.d/99-lab.conf && sudo systemctl restart systemd-journald`):
+
+**Test A — before/after `--relinquish-var`:**
+
+```
+$ logger "relinquish test A"
+$ journalctl --file=/run/log/journal/$(cat /etc/machine-id)/system.journal | grep "relinquish test A"
+Failed to open files: No such file or directory        # not in RAM — directory doesn't exist yet
+$ journalctl --file=/var/log/journal/$(cat /etc/machine-id)/user-1000.journal | grep "relinquish test A"
+Sep 25 21:31:32 lev-k ubuntu[13223]: relinquish test A  # on disk
+$ grep "relinquish test A" /var/log/syslog
+2026-09-25T21:31:32.261966+00:00 lev-k ubuntu: relinquish test A
+
+$ sudo journalctl --relinquish-var
+$ logger "relinquish test B"
+$ journalctl --file=/run/log/journal/$(cat /etc/machine-id)/system.journal | grep "relinquish test B"
+Sep 25 21:32:12 lev-k ubuntu[13237]: relinquish test B  # now in RAM
+$ journalctl --file=/var/log/journal/$(cat /etc/machine-id)/user-1000.journal | grep "relinquish test B"
+                                            # (empty — disk no longer growing)
+$ grep "relinquish test B" /var/log/syslog
+2026-09-25T21:32:12.206210+00:00 lev-k ubuntu: relinquish test B
+```
+
+**Test B — before/after `--flush`:**
+
+```
+$ logger "flush test A"
+$ journalctl --file=/run/log/journal/$(cat /etc/machine-id)/system.journal | grep "flush test A"
+Sep 25 21:32:45 lev-k ubuntu[13245]: flush test A       # still in RAM
+$ journalctl --file=/var/log/journal/$(cat /etc/machine-id)/user-1000.journal | grep "flush test A"
+                                            # (empty)
+
+$ sudo journalctl --flush
+$ logger "flush test B"
+$ journalctl --file=/run/log/journal/$(cat /etc/machine-id)/system.journal | grep "flush test B"
+Failed to open files: No such file or directory        # directory is gone now
+$ journalctl --file=/var/log/journal/$(cat /etc/machine-id)/user-1000.journal | grep "flush test B"
+Sep 25 21:35:38 lev-k ubuntu[13278]: flush test B       # back on disk
+```
+
+`/var/log/syslog` never changed across either test — rsyslog is fully independent of Storage transitions.
+
+## 3.4 — Durability: fsync timing and the crash scenario
+
+journald writes a message via `mmap` into page cache (RAM) first; it doesn't land on disk (`fsync`) immediately. We watched the journald process with `strace` to see which messages hold off fsync and which trigger it instantly.
+
+```
+# terminal 1
+$ sudo strace -f -e trace=fsync,fdatasync -p $(pidof systemd-journald)
+strace: Process 13215 attached
+
+# terminal 2
+$ logger "strace normal mesaj"
+```
+
+Nothing showed up in terminal 1.
+
+```
+# terminal 2
+$ logger -p crit "strace crit mesaj"
+```
+```
+# terminal 1
+fsync(18)                               = 0
+```
+
+```
+# terminal 2
+$ sudo journalctl --sync
+```
+```
+# terminal 1
+[pid 13319] fsync(18 ...)               = 0
+[pid 13215] fsync(19 ...)               = 0
+```
+
+| Sent | Seen in terminal 1 | Meaning |
+|---|---|---|
+| `logger "normal msg"` | nothing | normal priority holds off fsync, deferred to the `SyncIntervalSec` timer (default 5min) |
+| `logger -p crit "..."` | instant `fsync` | `crit`/`alert`/`emerg` messages don't wait for the timer, trigger sync instantly |
+| `sudo journalctl --sync` | instant `fsync` (multiple files) | manual force, flushes all open journal files to disk right away |
+
+Crash test: we secured one message with `--sync`, left one message unsecured, and instantly reset the machine (no shutdown procedure) with `sysrq-trigger`:
+
+```
+$ logger "crash test SYNCED"
+$ sudo journalctl --sync
+$ logger "crash test UNSYNCED" && echo b | sudo tee /proc/sysrq-trigger
+                                            # connection dropped instantly here
+```
+
+After reboot:
+
+```
+$ journalctl -b -1 | grep "crash test"
+Sep 25 21:52:44 lev-k ubuntu[13329]: crash test SYNCED
+$ grep "crash test" /var/log/syslog
+                                            # (empty — NEITHER shows up, including SYNCED)
+```
+
+| Message | On journald's side (`-b -1`) | On syslog's side |
+|---|---|---|
+| `crash test SYNCED` (+ `--sync`) | survived | **lost** |
+| `crash test UNSYNCED` | lost | lost |
+
+Unexpected but important result: `--sync` only guarantees journald's own binary file, it never forces rsyslog to sync its own text file. rsyslog has its own independent buffer/sync policy; it hadn't hit disk yet at the moment of the crash, so it was lost too. Even a message that's "guaranteed" on journald's side can remain unguaranteed on syslog's side — concrete proof that the two systems are genuinely independent.
+
+## 3.5 — journalctl reference (remaining commands)
+
+Beyond what was tested live above, these are additional filtering/format/cleanup flags mentioned in the notes but not covered as a case study. Pure reference table — some (`--disk-usage`, `--vacuum-*`, `--rotate`) were tried on the machine, the rest weren't.
+
+| Command | What it does |
+|---|---|
+| `journalctl --disk-usage` | shows the journal's total disk usage |
+| `sudo journalctl --vacuum-size=SIZE` | deletes archived files down to a size limit — **never touches the active file**, so total usage may stay above the limit. The trailing `~` on deleted archive names marks an "unclean shutdown" archive |
+| `sudo journalctl --rotate` | rotates the active file into an archive and opens a new active file — runs silently, effect is confirmed via `journalctl -u systemd-journald` |
+| `journalctl -S <time>` / `-U <time>` | short form of `--since`/`--until` |
+| `journalctl -b` / `-b -1` | logs for a specific boot (`-1` = the previous boot) — `-b -1` was used live in the crash test (3.4) |
+| `journalctl --list-boots` | list every recorded boot |
+| `journalctl _COMM=sshd` | filter by field match (`_COMM` = trusted field, command name) |
+| `journalctl _COMM=sshd + _COMM=autossh` | OR two field matches with `+` |
+| `journalctl --field=_COMM` | list every value a field can take |
+| `journalctl -o verbose` | show every field of an entry (including trusted ones) |
+| `journalctl -o json` / `-o json -f` | JSON output, can be combined with follow |
+| `journalctl -o short-monotonic` | show the timestamp as time elapsed since boot |
+| `journalctl --header` | show the journal file's own header info (format, size limits...) |
+
+## Notes
+
+| Concept | Note |
+|---|---|
+| `syslog` vs `rsyslog` | `syslog` is a protocol/API name (RFC 5424, the `syslog()` function), not a concrete program; `rsyslog` is Ubuntu's default concrete implementation (`r` = "rocket-fast", emphasizing performance) |
+| journald ↔ rsyslog relationship | one-way copy (`ForwardToSyslog=yes`), two independent systems — one doesn't inherit the other's guarantees (see the 3.4 crash test) |
+| `Storage=auto` (Ubuntu default) | writes to `/var/log/journal` if it exists (behaves like persistent), doesn't create the directory itself |
+| `SyncIntervalSec` | the one durability setting; `Seal` is for tamper detection, `Compress` is for disk savings — neither affects durability |
+| Rotation/retention (`SystemMaxUse`, `MaxRetentionSec`...) | not covered in this part, to be handled separately |
+
+**Skipped:** disk quota was already covered in Part 4; rotation/retention deliberately left out (see above).
 
 [↑ Go back to TOC](#table-of-contents)
 

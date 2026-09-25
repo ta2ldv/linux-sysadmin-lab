@@ -34,7 +34,7 @@ Bu lab'ın uzun vadeli hedefi virtualization ve Kubernetes. Buradaki hemen her b
 | 0 | [Linux dosya yapısı](#bölüm-0--linux-dosya-yapısı) | Dizin ağacında ne nerede duruyor — /etc, /var, /usr, /bin ne için var? | ✅ |
 | 1 | [Everything is a file](#bölüm-1--everything-is-a-file) | File nedir, file descriptor nedir, socket nedir — ve neden *her şey* bir file? | ⏳ |
 | 2 | [systemd & systemctl](#bölüm-2--systemd--systemctl) | systemd makinedeki her programı nasıl kontrol ediyor? | ✅ |
-| 3 | [Logging & journalctl](#bölüm-3--logging--journalctl) | Log'lar nerede yaşıyor, journal nasıl sorgulanır? | 🔜 |
+| 3 | [Logging & journalctl](#bölüm-3--logging--journalctl) | Log'lar nerede yaşıyor, journal nasıl sorgulanır? | ✅ |
 | 4 | [Users & groups](#bölüm-4--users--groups) | User nasıl yaratılır, kısıtlanır, yok edilir — group gerçekte nedir? | ✅ |
 | 5 | [Package management (apt)](#bölüm-5--package-management-apt) | `apt install` deyince gerçekte ne oluyor — repo'lar, GPG key'ler, binary'ler? | 🔜 |
 | 6 | [Process management](#bölüm-6--process-management) | Process nedir, signal nedir — SIGTERM ile SIGKILL'i gerçekte ne ayırır? | 🔜 |
@@ -107,9 +107,6 @@ lrwxrwxrwx ... sbin -> usr/sbin
 - `/etc` içindeki her şey neredeyse hep text config'tir, binary olmaz — bu bir kural değil ama yaygın kabul.
 - `/usr` altı apt'ın yönettiği alandır: apt install ettiğin her şey buraya düşer, elle dokunulmaz.
 - Servis hesaplarının home'u genelde `/nonexistent` ya da `/var/lib/<servis>` olur, `/home` altında değil (bkz. Bölüm 4).
-
-Levent'e sor:
-- Bu makinede `/tmp` gerçekten tmpfs (RAM) olarak mı mount edilmiş, yoksa disk üzerinde mi — `mount | grep /tmp` ile doğrulanmadı.
 
 [↑ İçindekilere dön](#i̇çindekiler)
 
@@ -405,7 +402,350 @@ Süreç:
 
 # Bölüm 3 — Logging & journalctl
 
-> 🔜 Placeholder — journal, unit/zaman/priority ile filtreleme, rsyslog, log rotation.
+Makine: Ubuntu 24.04 (AWS), hesap `ubuntu` (`adm` group'unda — journalctl/`/var/log` okuma yetkisi buradan gelir).
+
+## Cheat sheet
+
+| Komut | Ne yapar |
+|---|---|
+| `logger "mesaj"` | test mesajı gönder (klasik `syslog()` çağrısı, `/dev/log` üzerinden) |
+| `logger -p crit "mesaj"` | belirli priority ile gönder (`crit`+ mesajlar journald'da anında fsync tetikler) |
+| `logger -u <socket> "mesaj"` | `/dev/log` yerine doğrudan bir Unix socket'e yaz |
+| `journalctl -u <unit>` | belirli unit'in loglarını göster |
+| `journalctl -u <unit> -n N` | son N satır |
+| `journalctl --since ... --until ...` | zaman aralığına göre filtrele |
+| `journalctl -p <sev>` / `-p a..b` | severity'ye göre filtrele (tek değer veya aralık, ikisi de dahil) |
+| `journalctl -f` | canlı takip |
+| `journalctl -b [-N]` | belirli boot'un logları (`-1` = bir önceki boot) |
+| `journalctl --file=<path>` | belirli bir journal dosyasını doğrudan oku |
+| `journalctl --flush` | RAM'deki (`/run/log/journal`) logları diske (`/var/log/journal`) taşı |
+| `journalctl --relinquish-var` | diski bırak, yeni yazımlar RAM'e gitsin |
+| `journalctl --sync` | tüm açık journal dosyalarını elle diske indir (fsync) |
+| `systemd-analyze cat-config systemd/journald.conf` | tüm config katmanlarının birleşmiş/etkin halini göster |
+| `systemctl is-active rsyslog` | rsyslog çalışıyor mu |
+| `strace -f -e trace=fsync,fdatasync -p $(pidof systemd-journald)` | journald'ın ne zaman fsync yaptığını canlı izle |
+
+## 3.1 — Mimari: giriş kapıları → journald → dosya (+ syslog aynası)
+
+### Diyagram 1 — temel akış: kaynaklar → journald → depolama
+
+![journald mimarisi - seviye 1](misc/journald_architecture_mermaid.png)
+
+En basit hal: giriş kapıları (kernel ring buffer, syslog(), native API, systemd stdout/stderr, kernel audit) journald'da toplanır, kalıcı (disk) veya geçici (RAM) depoya yazılır, ayarlıysa syslog/kmsg/console/wall'a iletilir. Mekanizma detayı yok, sadece akış.
+
+### Diyagram 2 — + rate limiting, mmap, forward hedefinin ayrıntısı
+
+![journald mimarisi - seviye 2](misc/journald_architecture_mermaid_2.png)
+
+Bir önceki diyagrama eklenenler: journald'ın mesajlara filtre/rate limit uygulaması, journal dosyasına `mmap` ile erişim, ve forward hedefinin açılımı — rsyslog artık kendi gerçek dosyalarına yazan ayrı bir kutu (`/var/log/syslog`, `/var/log/auth.log`, `/var/log/kern.log`).
+
+### Diyagram 3 — kapsamlı: config katmanları, durability, rotation, RAM ayrımı
+
+![journald mimarisi - seviye 3](misc/journald_architecture_mermaid_3.png)
+
+En kapsamlı hal. Ek olarak: config dosyalarının katmanları (`journald.conf` + drop-in'ler), `Storage=` değerlerinin dördü, shutdown'da `--smart-relinquish-var` ile RAM'e geri dönüş, durability zinciri (kernel writeback → `SyncIntervalSec` → CRIT+ mesajlarda anında sync), rotation/retention ayarları ve en kritik nokta: RAM'deki geçici journal (tmpfs, `/run/log/journal`) ile kalıcı dosyanın RAM'deki page cache'i FARKLI şeyler.
+
+| `Storage=` değeri | Ne olur |
+|---|---|
+| `persistent` | disk yoksa oluşturulur, her zaman diske yazılır |
+| `auto` (varsayılan) | `/var/log/journal` varsa diske, yoksa RAM'e |
+| `volatile` | her zaman RAM (tmpfs), reboot'ta kaybolur |
+| `none` | journal dosyasına hiç yazılmaz, sadece forwarding çalışır |
+
+| Kritik ayrım | Anlamı |
+|---|---|
+| `--flush` vs `--sync` | flush: geçici journal → kalıcı journal geçişi; sync: yazılmış kayıtların diske inmesini (fsync) bekleme |
+| `SyncIntervalSec` | "her kayıt bu süre kadar RAM'de bekler" demek değil — kernel writeback daha erken yazabilir |
+| append-based ≠ append-only | kayıtlar ekleme şeklinde yazılır ama dosya başlığı ve indeksler güncellenebilir |
+
+journald'a mesaj 4 farklı kapıdan girebilir: kernel ring buffer (`/dev/kmsg`), klasik `syslog()` çağrısı (`/dev/log`), native `sd_journal_send()` socket'i, ve unit'lerin stdout/stderr'ı. Hepsi journald'da toplanır, trusted field'lar eklenir (`_PID`, `_UID`, `_COMM`, `_SYSTEMD_UNIT`... — client bunları sahteleyemez), kendi binary `*.journal` dosyasına yazılır. `ForwardToSyslog=yes` ayarı açıksa aynı mesajın bir kopyası ayrıca rsyslog'a gider.
+
+```
+logger "mesaj"
+   │ (syslog() çağrısı, /dev/log üzerinden)
+   ▼
+systemd-journald ──────────► *.journal (binary)
+   │
+   │ (ForwardToSyslog=yes)
+   ▼
+/run/systemd/journal/syslog (socket)
+   │
+   ▼
+rsyslog ───────────────────► /var/log/syslog (text)
+```
+
+Test: tek `logger` komutu, iki farklı sistemde iki farklı formatta (binary vs text) görünüyor mu?
+
+```
+$ logger "Naber journalctl!"
+$ journalctl -n 3
+Sep 24 20:38:20 lev-k ubuntu[1202]: Naber journalctl!
+$ systemctl is-active rsyslog
+active
+$ sudo tail -3 /var/log/syslog
+2026-09-24T20:40:08.081218+00:00 lev-k ubuntu: Naber journalctl!
+```
+
+Aynı mesaj iki tarafta da göründü. Kaynak drop-in:
+
+```
+$ cat /usr/lib/systemd/journald.conf.d/syslog.conf
+[Journal]
+ForwardToSyslog=yes
+```
+
+Sırayı doğrulamak için journald'ı atlayıp rsyslog'un dinlediği socket'e doğrudan yazmayı denedik:
+
+```
+$ echo "<13>socat test mesaji" | socat - UNIX-SENDTO:/run/systemd/journal/syslog
+$ logger -u /run/systemd/journal/syslog "logger ile direkt socket testi"
+$ tail -f /var/log/syslog
+2026-09-24T20:56:12.871346+00:00 lev-k socat test mesaji
+2026-09-24T20:57:41.352612+00:00 lev-k ubuntu: logger ile direkt socket testi
+$ journalctl | grep -E "socat test|direkt socket testi"
+                                            # (boş — hiçbir eşleşme yok)
+```
+
+| Yöntem | journalctl'de görünür mü | syslog'da görünür mü | Neden |
+|---|---|---|---|
+| `logger` (normal, `/dev/log`) | evet | evet (forward sayesinde) | önce journald'a girer |
+| socket'e doğrudan yazma (`socat`/`logger -u`) | hayır | evet | journald'ı tamamen atlıyor, doğrudan rsyslog'un dinlediği socket'e düşüyor |
+
+Bu, journald ile rsyslog'un iki bağımsız sistem olduğunun ilk kanıtı — biri diğerinin arkasında sessizce çalışmıyor, aralarında sadece tek yönlü bir kopyalama ilişkisi var.
+
+## 3.2 — Dosya envanteri ve config katmanları
+
+journald'a ait dosya/dizinler nerede duruyor (disk mi RAM mi), ayar değiştirmek istediğinde nereye yazman gerekiyor.
+
+| Yol | Ne | Kalıcı mı |
+|---|---|---|
+| `/usr/lib/systemd/systemd-journald` | daemon binary | disk |
+| `/usr/bin/journalctl` | client — dosyaları doğrudan okur, daemon'a sormaz | disk |
+| `/etc/systemd/journald.conf` | admin ana config | disk |
+| `/etc/systemd/journald.conf.d/*.conf` | admin drop-in | disk |
+| `/run/systemd/journald.conf.d/*.conf` | runtime drop-in | RAM |
+| `/usr/lib/systemd/journald.conf.d/*.conf` (`syslog.conf`) | vendor drop-in | disk |
+| `/var/log/journal/<machine-id>/` | kalıcı log verisi | disk |
+| `/run/log/journal/<machine-id>/` | volatile log verisi | RAM (tmpfs) |
+| `/run/systemd/journal/{dev-log,socket,stdout,syslog}` | AF_UNIX socket'lar | RAM |
+
+Config katman önceliği: ana dosya önce okunur, sonra tüm drop-in'ler alfabetik sırayla; **aynı isimli drop-in'de `/etc` > `/run` > `/usr/lib`** kazanır.
+
+```
+$ systemd-analyze cat-config systemd/journald.conf
+# /etc/systemd/journald.conf
+...
+[Journal]
+ForwardToSyslog=yes
+```
+
+`ForwardToSyslog` derleme zamanı default'unda `no` (ana dosyadaki `#ForwardToSyslog=no` satırı yorum, hiç etkili değil); etkin `yes` değeri vendor drop-in'inden (`/usr/lib/.../syslog.conf`) geliyor — Ubuntu'nun eski syslog pipeline'ıyla uyumluluk için bilinçli tercihi.
+
+Kendi drop-in'imizi yazıp doğruladık:
+
+```
+$ printf '[Journal]\nCompress=no\n' | sudo tee /etc/systemd/journald.conf.d/99-lab.conf
+$ sudo systemctl restart systemd-journald
+$ systemd-analyze cat-config systemd/journald.conf | tail -n 10
+# /etc/systemd/journald.conf.d/99-lab.conf
+[Journal]
+Compress=no
+
+# /usr/lib/systemd/journald.conf.d/syslog.conf
+[Journal]
+ForwardToSyslog=yes
+```
+
+İki drop-in yan yana, ikisi de etkin — anahtarlar çakışmadığı sürece katmanlar birleşir, sadece aynı anahtar birden fazla yerde tanımlıysa öncelik kuralı devreye girer.
+
+Temizlik: `sudo rm /etc/systemd/journald.conf.d/99-lab.conf && sudo systemctl restart systemd-journald && sudo rmdir /etc/systemd/journald.conf.d/`
+
+## 3.3 — Storage= ve flush akışı (RAM ↔ disk)
+
+`Storage=` journald'ın nereye yazacağını belirler: `auto` (Ubuntu default'u) = `/var/log/journal` varsa oraya (kalıcı gibi davranır, dizini kendi oluşturmaz); `volatile` = sadece `/run/log/journal` (RAM), reboot'ta gider; `none` = hiç yazma, sadece forward et.
+
+| Dizin | Storage | Mount kaynağı |
+|---|---|---|
+| `/var/log/journal/<machine-id>/` | Disk | `/dev/root` |
+| `/run/log/journal/<machine-id>/` | RAM | `tmpfs` |
+
+```
+$ df -h /var /run
+Filesystem      Size  Used Avail Use% Mounted on
+/dev/root        19G  2.8G   16G  15% /
+tmpfs            83M  2.0M   82M   3% /run
+```
+
+Test: `Storage=volatile` drop-in'i yazıp restart, reboot öncesi/sonrası karşılaştır:
+
+```
+$ printf '[Journal]\nStorage=volatile\n' | sudo tee /etc/systemd/journald.conf.d/99-lab.conf
+$ sudo systemctl restart systemd-journald
+$ logger "volatile reboot testi"
+$ journalctl | grep "volatile reboot testi"
+Sep 25 14:06:37 lev-k ubuntu[7508]: volatile reboot testi
+$ grep "volatile reboot testi" /var/log/syslog
+2026-09-25T14:06:37.908970+00:00 lev-k ubuntu: volatile reboot testi
+
+$ sudo reboot
+```
+
+Reboot sonrası:
+
+```
+$ journalctl | grep "volatile reboot testi"
+                                            # (boş)
+$ grep "volatile reboot testi" /var/log/syslog
+2026-09-25T14:06:37.908970+00:00 lev-k ubuntu: volatile reboot testi
+```
+
+`Storage=volatile` iken journal RAM'de (`/run/log/journal`) yaşıyor, reboot'ta sıfırlanıyor — mesaj journalctl'den gitti. `/var/log/syslog` etkilenmedi, çünkü rsyslog kendi bağımsız text dosyasına yazıyor ve journald'ın Storage ayarından habersiz.
+
+`--flush` ve `--relinquish-var` bu iki modu **restart etmeden, canlıyken** birbirine çevirir:
+
+| Flag | Yön | Ne yapar |
+|---|---|---|
+| `--flush` | RAM → Disk | `/run/log/journal`'daki birikmiş logları `/var/log/journal`'a taşır, sonraki yazımlar diske gider |
+| `--relinquish-var` | Disk → RAM | diski bırakır, sonraki yazımlar RAM'e gider (diskteki eski kayıtlar silinmez) |
+
+Canlı geçiş testi (önce temiz `persistent` durumuna dönüldü: `sudo rm /etc/systemd/journald.conf.d/99-lab.conf && sudo systemctl restart systemd-journald`):
+
+**Test A — `--relinquish-var` öncesi/sonrası:**
+
+```
+$ logger "relinquish test A"
+$ journalctl --file=/run/log/journal/$(cat /etc/machine-id)/system.journal | grep "relinquish test A"
+Failed to open files: No such file or directory        # RAM'de yok — dizin henüz yok
+$ journalctl --file=/var/log/journal/$(cat /etc/machine-id)/user-1000.journal | grep "relinquish test A"
+Sep 25 21:31:32 lev-k ubuntu[13223]: relinquish test A  # disk'te var
+$ grep "relinquish test A" /var/log/syslog
+2026-09-25T21:31:32.261966+00:00 lev-k ubuntu: relinquish test A
+
+$ sudo journalctl --relinquish-var
+$ logger "relinquish test B"
+$ journalctl --file=/run/log/journal/$(cat /etc/machine-id)/system.journal | grep "relinquish test B"
+Sep 25 21:32:12 lev-k ubuntu[13237]: relinquish test B  # artık RAM'de
+$ journalctl --file=/var/log/journal/$(cat /etc/machine-id)/user-1000.journal | grep "relinquish test B"
+                                            # (boş — disk artık büyümüyor)
+$ grep "relinquish test B" /var/log/syslog
+2026-09-25T21:32:12.206210+00:00 lev-k ubuntu: relinquish test B
+```
+
+**Test B — `--flush` öncesi/sonrası:**
+
+```
+$ logger "flush test A"
+$ journalctl --file=/run/log/journal/$(cat /etc/machine-id)/system.journal | grep "flush test A"
+Sep 25 21:32:45 lev-k ubuntu[13245]: flush test A       # hâlâ RAM'de
+$ journalctl --file=/var/log/journal/$(cat /etc/machine-id)/user-1000.journal | grep "flush test A"
+                                            # (boş)
+
+$ sudo journalctl --flush
+$ logger "flush test B"
+$ journalctl --file=/run/log/journal/$(cat /etc/machine-id)/system.journal | grep "flush test B"
+Failed to open files: No such file or directory        # dizin artık yok
+$ journalctl --file=/var/log/journal/$(cat /etc/machine-id)/user-1000.journal | grep "flush test B"
+Sep 25 21:35:38 lev-k ubuntu[13278]: flush test B       # diske döndü
+```
+
+`/var/log/syslog` her iki testte de değişmedi — rsyslog Storage geçişlerinden tamamen bağımsız.
+
+## 3.4 — Durability: fsync zamanlaması ve crash senaryosu
+
+journald bir mesajı `mmap` ile önce page cache'e (RAM) yazar; gerçek diske iniş (`fsync`) hemen olmaz. `strace` ile journald process'ini izleyip hangi mesajların fsync'i beklettiğini, hangilerinin anında tetiklediğini gördük.
+
+```
+# terminal 1
+$ sudo strace -f -e trace=fsync,fdatasync -p $(pidof systemd-journald)
+strace: Process 13215 attached
+
+# terminal 2
+$ logger "strace normal mesaj"
+```
+
+Terminal 1'de hiçbir şey görünmedi.
+
+```
+# terminal 2
+$ logger -p crit "strace crit mesaj"
+```
+```
+# terminal 1
+fsync(18)                               = 0
+```
+
+```
+# terminal 2
+$ sudo journalctl --sync
+```
+```
+# terminal 1
+[pid 13319] fsync(18 ...)               = 0
+[pid 13215] fsync(19 ...)               = 0
+```
+
+| Gönderilen | Terminal 1'de görülen | Anlamı |
+|---|---|---|
+| `logger "normal mesaj"` | hiçbir şey | normal öncelik fsync'i bekletir, `SyncIntervalSec` timer'ına (default 5dk) bırakır |
+| `logger -p crit "..."` | anında `fsync` | `crit`/`alert`/`emerg` mesajlar timer'ı beklemez, anında sync tetikler |
+| `sudo journalctl --sync` | anında `fsync` (birden fazla dosya) | elle zorlama, tüm açık journal dosyalarını hemen diske indirir |
+
+Crash testi: bir mesajı `--sync` ile garantiye alıp, bir mesajı garantisiz bırakıp makineyi `sysrq-trigger` ile anında (kapanış prosedürü olmadan) resetledik:
+
+```
+$ logger "crash test SYNCED"
+$ sudo journalctl --sync
+$ logger "crash test UNSYNCED" && echo b | sudo tee /proc/sysrq-trigger
+                                            # bağlantı burada anında koptu
+```
+
+Reboot sonrası:
+
+```
+$ journalctl -b -1 | grep "crash test"
+Sep 25 21:52:44 lev-k ubuntu[13329]: crash test SYNCED
+$ grep "crash test" /var/log/syslog
+                                            # (boş — HİÇBİRİ yok, SYNCED dahil)
+```
+
+| Mesaj | journald tarafında (`-b -1`) | syslog tarafında |
+|---|---|---|
+| `crash test SYNCED` (+ `--sync`) | kaldı | **kayboldu** |
+| `crash test UNSYNCED` | kayboldu | kayboldu |
+
+Beklenmedik ama önemli sonuç: `--sync` sadece journald'ın kendi binary dosyasını garantiye alıyor, rsyslog'un kendi text dosyasını sync'lemesini hiç zorlamıyor. rsyslog'un kendi bağımsız buffer/sync politikası var; crash anında henüz diske inmemişti, o da kayboldu. journald tarafında "garantili" olan bir mesaj bile syslog tarafında garantisiz kalabiliyor — iki sistemin gerçekten bağımsız olduğunun bir başka somut kanıtı.
+
+## 3.5 — journalctl referansı (kalan komutlar)
+
+Yukarıda gerçek çıktıyla test edilenlerin dışında, notlarda geçen ama case study yapılmamış ek filtreleme/format/temizlik flag'leri. Saf referans tablosu — bir kısmı (`--disk-usage`, `--vacuum-*`, `--rotate`) makinede denendi, kalanı denenmedi.
+
+| Komut | Ne yapar |
+|---|---|
+| `journalctl --disk-usage` | Journal'ın toplam disk kullanımını gösterir |
+| `sudo journalctl --vacuum-size=SIZE` | Arşiv dosyalarını boyut limitine göre siler — **aktif dosyaya asla dokunmaz**, o yüzden toplam kullanım limitin altına inmeyebilir. Silinen arşiv dosya adlarındaki `~` eki "kirli kapanmış" (unclean shutdown) işaretidir |
+| `sudo journalctl --rotate` | Aktif dosyayı arşive çevirir, yeni aktif dosya açar — sessiz çalışır, etkisi `journalctl -u systemd-journald` ile doğrulanır |
+| `journalctl -S <zaman>` / `-U <zaman>` | `--since`/`--until` kısa formu |
+| `journalctl -b` / `-b -1` | belirli bir boot'un logları (`-1` = bir önceki boot) — `-b -1` crash testinde canlı kullanıldı (3.4) |
+| `journalctl --list-boots` | kayıtlı tüm boot'ları listele |
+| `journalctl _COMM=sshd` | field eşleşmesiyle filtrele (`_COMM` = trusted field, komut adı) |
+| `journalctl _COMM=sshd + _COMM=autossh` | `+` ile iki field eşleşmesini OR'la |
+| `journalctl --field=_COMM` | bir field'ın alabileceği tüm değerleri listele |
+| `journalctl -o verbose` | her entry'nin tüm field'larını (trusted dahil) göster |
+| `journalctl -o json` / `-o json -f` | JSON çıktısı, canlı takiple birlikte de kullanılabilir |
+| `journalctl -o short-monotonic` | zaman damgasını boot'tan beri geçen süre olarak göster |
+| `journalctl --header` | journal dosyasının kendi header bilgisini (format, boyut limitleri...) göster |
+
+## Notlar
+
+| Kavram | Not |
+|---|---|
+| `syslog` vs `rsyslog` | `syslog` bir protokol/API adı (RFC 5424, `syslog()` fonksiyonu), somut program değil; `rsyslog` Ubuntu'nun varsayılan somut implementasyonu (`r` = "rocket-fast", performans vurgusu) |
+| journald ↔ rsyslog ilişkisi | tek yönlü kopyalama (`ForwardToSyslog=yes`), iki bağımsız sistem — biri diğerinin garantisini miras almaz (bkz. 3.4 crash testi) |
+| `Storage=auto` (Ubuntu default) | `/var/log/journal` varsa oraya yazar (persistent gibi davranır), dizini kendi oluşturmaz |
+| `SyncIntervalSec` | tek durability ayarı; `Seal` tamper tespiti içindir, `Compress` disk tasarrufu içindir — ikisinin de durability'ye etkisi yok |
+| Rotation/retention (`SystemMaxUse`, `MaxRetentionSec`...) | bu bölüme girmedi, ayrı ele alınacak |
+
+**Atlanan:** disk quota Bölüm 4'te değerlendirilmişti; rotation/retention ayrı bırakıldı (yukarıya bkz.).
 
 [↑ İçindekilere dön](#i̇çindekiler)
 
