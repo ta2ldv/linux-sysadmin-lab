@@ -59,14 +59,37 @@ Machine: Ubuntu 24.04 (AWS). This part isn't lab practice, it's a standard FHS (
 | `/usr` | installed programs + libraries + shared data | persistent, apt-managed | package manager (apt) |
 | `/bin` | core commands (`ls`, `cat`...) — symlink to `/usr/bin` on Ubuntu | persistent | package manager |
 | `/home` | users' personal files | persistent | the user themself |
-| `/tmp` | short-lived temporary files | cleaned periodically (`systemd-tmpfiles`), tmpfs or disk depending on the distro | everyone (world-writable, sticky bit) |
+| `/tmp` | short-lived temporary files | cleaned periodically (`systemd-tmpfiles`), tmpfs or disk depending on the distro (on this machine: disk — see 0.4) | everyone (world-writable, sticky bit) |
 | `/opt` | non-apt, self-contained 3rd-party software | persistent | manual installs |
 | `/proc` | running processes + kernel state — not a real file, a live view of the kernel | in RAM, not on disk | kernel |
 | `/sys` | virtual fs where the kernel exports device/driver info | in RAM, not on disk | kernel |
 | `/dev` | device nodes (`/dev/sda`, `/dev/null`, `/dev/tty1`...) | in RAM (devtmpfs), not on disk | kernel (udev) |
 | `/lib` | kernel modules + shared libraries for core programs — symlink to `/usr/lib` on Ubuntu | persistent | package manager |
 
-## 0.1 — Why `/bin` and `/lib` are symlinks
+## 0.1 — Directory tree (overview)
+
+```
+/
+|-- bin -> usr/bin              # symlink (usrmerge)
+|-- sbin -> usr/sbin             # symlink (usrmerge)
+|-- lib -> usr/lib               # symlink (usrmerge)
+|-- etc/                         # system-wide config, text
+|-- usr/                         # apt-managed: programs, libraries, shared data
+|-- var/                         # persistent, changing data
+|   |-- log/                     # log files
+|   |-- lib/                     # service state/data (persistent)
+|   `-- tmp/                     # temp files kept longer than /tmp, always on disk
+|-- tmp/                         # short-lived temp files (on this machine: disk, not tmpfs -- see 0.4)
+|-- opt/                         # non-apt, 3rd-party software
+|-- home/                        # user home directories
+|-- root/                        # root user's home, separate from /home
+|-- proc/                        # virtual, kernel process view -- not on disk
+|-- sys/                         # virtual, kernel device/driver view -- not on disk
+|-- dev/                         # device nodes (devtmpfs) -- not on disk
+`-- run/                         # tmpfs, runtime data -- recreated from scratch on every boot
+```
+
+## 0.2 — Why `/bin` and `/lib` are symlinks
 
 Ubuntu adopted "usrmerge": `/bin`, `/sbin`, `/lib` used to be separate directories at the root, because early boot might happen before `/usr` was mounted. Now that the initramfs mounts everything early, the split became pointless — everything moved under `/usr`, and the old names stayed as symlinks for backward compatibility.
 
@@ -83,7 +106,7 @@ lrwxrwxrwx ... sbin -> usr/sbin
 | `/sbin/reboot` | `/usr/sbin/reboot` |
 | `/lib/systemd` | `/usr/lib/systemd` |
 
-## 0.2 — `/proc`, `/sys`, `/dev`: not on disk
+## 0.3 — `/proc`, `/sys`, `/dev`: not on disk
 
 All three are **virtual** filesystems. They show up in `df -h` but use no disk space; the kernel recreates them from scratch on every reboot.
 
@@ -94,13 +117,32 @@ All three are **virtual** filesystems. They show up in `df -h` but use no disk s
 | `/sys/class/net/` | kernel objects for network interfaces | `/sys/class/net/eth0` |
 | `/dev/sda`, `/dev/null`, `/dev/tty1` | device node — writing to it means talking to hardware | `echo hi > /dev/null` |
 
-## 0.3 — `/tmp` vs `/var/tmp` vs `/opt`
+## 0.4 — `/tmp` vs `/var/tmp` vs `/opt`
 
 | Directory | Lifetime | Use |
 |-----------|----------|-----|
 | `/tmp` | short — periodically swept by `systemd-tmpfiles` | short-lived temp files |
 | `/var/tmp` | kept longer than `/tmp`, always on disk | temp files for long-running jobs |
 | `/opt` | persistent, not managed by apt | 3rd-party software that ships as a single self-contained package (e.g. `/opt/google/chrome`) |
+
+**Verified on this machine: `/tmp` is disk, not tmpfs.**
+
+```
+$ mount | grep " /tmp "
+(empty -- no match, not a separate mount point)
+$ df -h /tmp
+Filesystem      Size  Used Avail Use% Mounted on
+/dev/root        19G  2.6G   16G  15% /
+$ systemctl cat tmp.mount
+No files found for tmp.mount.
+```
+
+On Ubuntu 24.04, systemd's `tmp.mount` unit is shipped by the package to `/usr/share/systemd/tmp.mount`, not `/usr/lib/systemd/system/` — meaning the unit is never even "installed" (not disabled, just absent). With no `/tmp` entry in `/etc/fstab` either, `/tmp` stays a plain directory under `/` (root filesystem, disk). This isn't specific to the cloud image, it's Ubuntu 24.04's general default (Debian 13/trixie switched it to tmpfs, Ubuntu 24.04 did not). `systemd-tmpfiles` has nothing to do with this — it only cleans up old files inside `/tmp` (older than 10 days on 24.04), it has no bearing on the mount itself.
+
+Sources:
+- https://packages.ubuntu.com/noble/amd64/systemd/filelist
+- https://www.debian.org/releases/trixie/release-notes/issues.en.html
+- https://github.com/systemd/systemd/blob/main/units/tmp.mount
 
 ## Notes
 

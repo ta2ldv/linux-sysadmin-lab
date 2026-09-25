@@ -59,14 +59,37 @@ Makine: Ubuntu 24.04 (AWS). Bu bölüm lab pratiği değil, standart FHS (Filesy
 | `/usr` | kurulu programlar + kütüphaneler + paylaşılan data | kalıcı, apt'ın yönettiği alan | paket yöneticisi (apt) |
 | `/bin` | temel komutlar (`ls`, `cat`...) — Ubuntu'da `/usr/bin`'e symlink | kalıcı | paket yöneticisi |
 | `/home` | user'ların kişisel dosyaları | kalıcı | user'ın kendisi |
-| `/tmp` | kısa ömürlü geçici dosyalar | periyodik temizlenir (`systemd-tmpfiles`), dağıtıma göre tmpfs ya da disk | herkes (world-writable, sticky bit) |
+| `/tmp` | kısa ömürlü geçici dosyalar | periyodik temizlenir (`systemd-tmpfiles`), dağıtıma göre tmpfs ya da disk (bu makinede: disk — bkz. 0.4) | herkes (world-writable, sticky bit) |
 | `/opt` | apt dışı, kendi kendine yeten 3rd-party yazılım | kalıcı | manuel kurulum |
 | `/proc` | çalışan process'ler + kernel durumu — gerçek dosya değil, kernel'in canlı görünümü | RAM'de, disk'te yok | kernel |
 | `/sys` | kernel'in device/driver bilgisini export ettiği sanal fs | RAM'de, disk'te yok | kernel |
 | `/dev` | device node'ları (`/dev/sda`, `/dev/null`, `/dev/tty1`...) | RAM'de (devtmpfs), disk'te yok | kernel (udev) |
 | `/lib` | kernel modülleri + temel programların shared library'leri — Ubuntu'da `/usr/lib`'e symlink | kalıcı | paket yöneticisi |
 
-## 0.1 — `/bin` ve `/lib` neden symlink
+## 0.1 — Dizin ağacı (genel bakış)
+
+```
+/
+|-- bin -> usr/bin              # symlink (usrmerge)
+|-- sbin -> usr/sbin             # symlink (usrmerge)
+|-- lib -> usr/lib               # symlink (usrmerge)
+|-- etc/                         # sistem geneli config, text
+|-- usr/                         # apt-managed: programlar, kütüphaneler, paylaşılan data
+|-- var/                         # kalıcı, değişen veri
+|   |-- log/                     # log dosyaları
+|   |-- lib/                     # servis state/data (kalıcı)
+|   `-- tmp/                     # /tmp'den daha uzun tutulan geçici dosya, her zaman disk
+|-- tmp/                         # kısa ömürlü geçici dosya (bu makinede: disk, tmpfs değil -- bkz. 0.4)
+|-- opt/                         # apt dışı, 3rd-party yazılım
+|-- home/                        # user home dizinleri
+|-- root/                        # root kullanıcısının home'u, /home'dan ayrı
+|-- proc/                        # sanal, kernel process görünümü -- disk'te yok
+|-- sys/                         # sanal, kernel device/driver görünümü -- disk'te yok
+|-- dev/                         # device node'ları (devtmpfs) -- disk'te yok
+`-- run/                         # tmpfs, runtime veri -- her boot'ta sıfırdan yaratılır
+```
+
+## 0.2 — `/bin` ve `/lib` neden symlink
 
 Ubuntu "usrmerge" yaptı: eskiden `/bin`, `/sbin`, `/lib` kök dizinde ayrı dururdu, çünkü early boot'ta `/usr` henüz mount edilmemiş olabiliyordu. Artık initramfs her şeyi erken mount ettiği için ayrım anlamsızlaştı; hepsi `/usr` altına taşındı, eski isimler geriye dönük uyumluluk için symlink olarak kaldı.
 
@@ -83,7 +106,7 @@ lrwxrwxrwx ... sbin -> usr/sbin
 | `/sbin/reboot` | `/usr/sbin/reboot` |
 | `/lib/systemd` | `/usr/lib/systemd` |
 
-## 0.2 — `/proc`, `/sys`, `/dev`: disk'te yoklar
+## 0.3 — `/proc`, `/sys`, `/dev`: disk'te yoklar
 
 Üçü de **sanal** dosya sistemi. `df -h` çıktısında görünürler ama disk alanı kullanmazlar; reboot'ta sıfırdan kernel tarafından yaratılırlar.
 
@@ -94,13 +117,32 @@ lrwxrwxrwx ... sbin -> usr/sbin
 | `/sys/class/net/` | network interface'lerin kernel nesneleri | `/sys/class/net/eth0` |
 | `/dev/sda`, `/dev/null`, `/dev/tty1` | device node — bir dosyaya yazmak donanımla konuşmak demektir | `echo hi > /dev/null` |
 
-## 0.3 — `/tmp` vs `/var/tmp` vs `/opt`
+## 0.4 — `/tmp` vs `/var/tmp` vs `/opt`
 
 | Dizin | Ömür | Kullanım |
 |-------|------|----------|
 | `/tmp` | kısa — `systemd-tmpfiles` periyodik temizler | kısa ömürlü geçici dosya |
 | `/var/tmp` | `/tmp`'den daha uzun tutulur, her zaman disk üzerinde | uzun süren işlerin geçici dosyası |
 | `/opt` | kalıcı, apt'ın yönetmediği alan | tek-paket halinde gelen 3rd-party yazılım (`/opt/google/chrome` gibi) |
+
+**Bu makinede doğrulandı: `/tmp` disk, tmpfs değil.**
+
+```
+$ mount | grep " /tmp "
+(boş — hiç eşleşme yok, ayrı mount noktası değil)
+$ df -h /tmp
+Filesystem      Size  Used Avail Use% Mounted on
+/dev/root        19G  2.6G   16G  15% /
+$ systemctl cat tmp.mount
+No files found for tmp.mount.
+```
+
+Ubuntu 24.04'te systemd'nin `tmp.mount` unit'i paket tarafından `/usr/lib/systemd/system/`'e değil `/usr/share/systemd/tmp.mount`'a konuyor — yani unit sistemde hiç "yüklü" bile değil (disable değil, yok). `/etc/fstab`'da da `/tmp` girişi yoksa, `/tmp` sadece `/` (root filesystem, disk) altında sıradan bir dizin olarak kalıyor. Bu cloud image'a özel bir durum değil, Ubuntu 24.04'ün genel default'u (Debian 13/trixie bunu tmpfs'e çevirdi, Ubuntu 24.04 çevirmedi). `systemd-tmpfiles`'ın bununla ilgisi yok — o sadece `/tmp` içindeki eski dosyaları (24.04'te 10 günden eskileri) temizliyor, mount ile alakası yok.
+
+Kaynaklar:
+- https://packages.ubuntu.com/noble/amd64/systemd/filelist
+- https://www.debian.org/releases/trixie/release-notes/issues.en.html
+- https://github.com/systemd/systemd/blob/main/units/tmp.mount
 
 ## Notlar
 
