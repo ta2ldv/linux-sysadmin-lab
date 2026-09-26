@@ -43,6 +43,7 @@ Bu lab'ın uzun vadeli hedefi virtualization ve Kubernetes. Buradaki hemen her b
 | 9 | [File permissions & ownership](#bölüm-9--file-permissions--ownership) | Kim neye dokunabilir — chmod, umask, setuid, ACL? | 🔜 |
 | 10 | [Disk & filesystem](#bölüm-10--disk--filesystem) | Disk nasıl directory'ye dönüşüyor — mount, fstab, LVM? | 🔜 |
 | 11 | [Cron & timers](#bölüm-11--cron--timers) | Bir işi zamanlayarak nasıl koştururum — cron mu systemd timer mı? | 🔜 |
+| 12 | [Memory & I/O](#bölüm-12--memory--io) | Bellek nasıl yönetilir — page cache, dirty page, writeback, fsync ne işe yarar? | 🔜 |
 
 ---
 
@@ -182,7 +183,16 @@ Makine: Ubuntu 24.04 (AWS), hesap `ubuntu` (sudo).
 | `sudo systemctl disable <servis>` | boot'ta otomatik başlamasın (symlink siler) |
 | `journalctl -u <servis> -n N` | son N log satırı |
 | `journalctl -u <servis> -f` | log'u canlı takip et |
+| `journalctl -u <servis> -p err` | sadece error+ seviyesindeki loglar |
 | `ls -la /etc/systemd/system/` | admin'in elle eklediği/enable ettiği unit'ler ve symlink'ler |
+| `sudo systemctl daemon-reload` | var olan unit dosyasındaki değişikliği systemd'ye bildir |
+| `systemctl show <unit> -p <Prop>` | tek bir property'nin nihai/etkin değerini göster |
+| `systemctl cat <unit>` | unit + drop-in'leri birleşik olarak göster |
+| `sudo systemctl edit <unit>` | drop-in override dosyası oluştur/düzenle (daemon-reload'u kendisi tetikler) |
+| `sudo systemctl mask <unit>` / `unmask` | elle `start`'ı bile imkansız hale getir / geri al |
+| `systemctl is-enabled/is-active/is-failed <unit>` | script-dostu tek kelime + exit code |
+| `systemctl list-unit-files` | tüm unit'lerin enable durumu |
+| `systemctl list-dependencies <unit>` | bağımlılık ağacı |
 
 ## 2.1 — PID 1: systemd
 
@@ -199,7 +209,7 @@ $ ps -p 1 -o pid,comm
 | `-p` | PID'e göre filtrele |
 | `-o pid,comm` | sadece PID ve process ismini (command) göster |
 
-Pratik önemi: `systemctl` komutları çalışıyor çünkü systemd'ye konuşuyorsun; `kill -9 1` teorik olarak sistemi çökertir çünkü kökü öldürmüş olursun.
+Pratik önemi: `systemctl` komutları çalışıyor çünkü systemd'ye konuşuyorsun. `kill -9 1` sistemi ÇÖKERTMEZ — kernel, PID 1'e handler kurulmamış sinyalleri (SIGKILL dahil) iletmez, sessizce yok sayılır (kaynak: `man 2 kill`, "init special case"; `man 7 signal`).
 
 ## 2.2 — systemd bir daemon, systemctl bir client
 
@@ -417,6 +427,68 @@ Süreç:
    Sep 21 22:15:36 lev-k systemd[1]: Started logger-demo.service - Demo heartbeat logger.
    ```
    Process state reboot'ta hiç korunmaz (eski PID 1901 gitti, yeni PID 525); korunan tek şey `.wants/` dizinindeki symlink — yani "bu servis boot'ta başlasın" bilgisi.
+8. **Round 2 (birkaç gün sonra): `logger-demo` silinip script + unit dosyası aynı içerikle yeniden yaratıldı, `Restart=`/`StartLimitBurst` davranışı canlı test edildi.** Önce mevcut ayarlara bakalım:
+   ```
+   $ systemctl show logger-demo -p Restart,RestartUSec,StartLimitBurst,StartLimitIntervalUSec
+   Restart=on-failure
+   RestartUSec=100ms          (default, biz yazmadık)
+   StartLimitIntervalUSec=10s (default)
+   StartLimitBurst=5          (default)
+   ```
+   | `Restart=` değeri | Ne zaman restart eder |
+   |---|---|
+   | `no` (default) | asla otomatik restart etmez |
+   | `on-failure` | process hatayla (non-zero exit ya da SIGTERM/SIGINT/SIGHUP/SIGPIPE dışında bir sinyalle) sonlanırsa |
+   | `on-abnormal` | sinyalle sonlanırsa, timeout olursa ya da watchdog tetiklenirse (temiz exit/normal stop sayılmaz) |
+   | `always` | nasıl sonlanırsa sonlansın (temiz stop dahil) her zaman |
+
+   `StartLimitBurst=5` / `StartLimitIntervalUSec=10s` = "10 saniye içinde 5'ten fazla restart denemesi olursa dur" rate limit'i.
+9. **Bozuk servis debug:** unit dosyasına kasıtlı olarak var olmayan bir `EnvironmentFile` eklendi:
+   ```
+   $ sudo sed -i '/ExecStart=/i EnvironmentFile=/etc/logger-demo-env-yok' /etc/systemd/system/logger-demo.service
+   $ sudo systemctl daemon-reload
+   $ sudo systemctl restart logger-demo
+   Job for logger-demo.service failed...
+   $ systemctl status logger-demo
+   Active: activating (auto-restart) (Result: resources)
+   ```
+   Birkaç saniye sonra rate limit devreye girer:
+   ```
+   × logger-demo.service - Demo heartbeat logger v2
+        Active: failed (Result: resources) since ...; 12s ago
+   Sep 26 15:22:30 lev-k systemd[1]: logger-demo.service: Scheduled restart job, restart counter is at 5.
+   Sep 26 15:22:30 lev-k systemd[1]: logger-demo.service: Start request repeated too quickly.
+   Sep 26 15:22:30 lev-k systemd[1]: logger-demo.service: Failed with result 'resources'.
+   ```
+   | Sembol | Anlamı |
+   |---|---|
+   | `●` | healthy/active |
+   | `○` | inactive |
+   | `×` | failed |
+
+   `resources` sonuç kategorisi = hatanın process'in exit kodundan değil, systemd'nin process'i başlatma altyapısından (burada: `EnvironmentFile` okunamadı) geldiğini gösterir. Diğer kategoriler: `exit-code`, `signal`, `timeout`, `core-dump`.
+   ```
+   $ systemctl is-failed logger-demo
+   failed
+   $ sudo systemctl reset-failed logger-demo
+   $ systemctl is-failed logger-demo
+   inactive
+   ```
+   `reset-failed` olmadan restart denemesi bile reddedilir (rate limit hâlâ aktif). Kök nedeni düzeltip (`-` prefix, bkz. 2.11) tekrar restart edildi:
+   ```
+   $ sudo sed -i 's#EnvironmentFile=/etc/logger-demo-env-yok#EnvironmentFile=-/etc/logger-demo-env-yok#' /etc/systemd/system/logger-demo.service
+   $ sudo systemctl daemon-reload
+   $ sudo systemctl restart logger-demo
+   $ systemctl is-failed logger-demo
+   active
+   ```
+   Log kanıtı (`-p err` = sadece error+ seviyesi):
+   ```
+   $ journalctl -u logger-demo -p err
+   Sep 26 15:22:30 lev-k systemd[1]: logger-demo.service: Failed to load environment files: No such file or directory
+   Sep 26 15:22:30 lev-k systemd[1]: Failed to start logger-demo.service - Demo heartbeat logger v2.
+   ```
+   Bu satır çifti 5 kere tekrarlanmış — `StartLimitBurst=5` ile birebir eşleşiyor.
 
 ## Kubernetes ile ilişkisi
 
@@ -1336,5 +1408,13 @@ Doğru sıra: **`find -uid` → sil/`chown` → `deluser`**.
 # Bölüm 11 — Cron & timers
 
 > 🔜 Placeholder — cron vs systemd timer.
+
+[↑ İçindekilere dön](#i̇çindekiler)
+
+---
+
+# Bölüm 12 — Memory & I/O
+
+> 🔜 Placeholder — page cache, dirty page, background writeback, `fsync`/`fdatasync`, `/proc/sys/vm/*`. Process management'tan (Bölüm 5) ayrıldı, ayrı bölüm oldu.
 
 [↑ İçindekilere dön](#i̇çindekiler)

@@ -43,6 +43,7 @@ The longer-term goal behind this lab is virtualization and Kubernetes. Almost ev
 | 9 | [File permissions & ownership](#part-9--file-permissions--ownership) | Who may touch what — chmod, umask, setuid, ACL? | 🔜 |
 | 10 | [Disk & filesystem](#part-10--disk--filesystem) | How do disks become directories — mount, fstab, LVM? | 🔜 |
 | 11 | [Cron & timers](#part-11--cron--timers) | How do I run things on a schedule — and cron vs systemd timers? | 🔜 |
+| 12 | [Memory & I/O](#part-12--memory--io) | How is memory managed — what do page cache, dirty pages, writeback, fsync actually do? | 🔜 |
 
 ---
 
@@ -182,7 +183,16 @@ Machine: Ubuntu 24.04 (AWS), account `ubuntu` (sudo).
 | `sudo systemctl disable <service>` | don't start at boot (removes the symlink) |
 | `journalctl -u <service> -n N` | last N log lines |
 | `journalctl -u <service> -f` | follow the log live |
+| `journalctl -u <service> -p err` | only error+ severity logs |
 | `ls -la /etc/systemd/system/` | units the admin added/enabled by hand, and symlinks |
+| `sudo systemctl daemon-reload` | tell systemd about a change to an existing unit file |
+| `systemctl show <unit> -p <Prop>` | show the final/effective value of a single property |
+| `systemctl cat <unit>` | show the unit + its drop-ins concatenated |
+| `sudo systemctl edit <unit>` | create/edit a drop-in override file (triggers its own daemon-reload) |
+| `sudo systemctl mask <unit>` / `unmask` | make even manual `start` impossible / undo that |
+| `systemctl is-enabled/is-active/is-failed <unit>` | script-friendly single word + exit code |
+| `systemctl list-unit-files` | enable state of every unit |
+| `systemctl list-dependencies <unit>` | dependency tree |
 
 ## 2.1 — PID 1: systemd
 
@@ -199,7 +209,7 @@ $ ps -p 1 -o pid,comm
 | `-p` | filter by PID |
 | `-o pid,comm` | show only PID and process name (command) |
 
-Practical relevance: `systemctl` commands work because you're talking to systemd; `kill -9 1` would theoretically crash the machine, since you'd be killing the root.
+Practical relevance: `systemctl` commands work because you're talking to systemd. `kill -9 1` does NOT crash the machine — the kernel never delivers signals without an installed handler (including SIGKILL) to PID 1; they're silently ignored (source: `man 2 kill`, the "init special case"; `man 7 signal`).
 
 ## 2.2 — systemd is a daemon, systemctl is a client
 
@@ -417,6 +427,68 @@ Process:
    Sep 21 22:15:36 lev-k systemd[1]: Started logger-demo.service - Demo heartbeat logger.
    ```
    Process state is never preserved across reboot (the old PID 1901 is gone, new PID 525); the only thing that survives is the symlink in `.wants/` — i.e. the "this service should start at boot" fact.
+8. **Round 2 (a few days later): `logger-demo` was deleted and recreated with the same script + unit file content, to live-test `Restart=`/`StartLimitBurst` behavior.** First, the current settings:
+   ```
+   $ systemctl show logger-demo -p Restart,RestartUSec,StartLimitBurst,StartLimitIntervalUSec
+   Restart=on-failure
+   RestartUSec=100ms          (default, we didn't set it)
+   StartLimitIntervalUSec=10s (default)
+   StartLimitBurst=5          (default)
+   ```
+   | `Restart=` value | When it restarts |
+   |---|---|
+   | `no` (default) | never restarts automatically |
+   | `on-failure` | the process exits with an error (non-zero exit, or is killed by a signal other than SIGTERM/SIGINT/SIGHUP/SIGPIPE) |
+   | `on-abnormal` | terminated by a signal, times out, or the watchdog fires (a clean exit/normal stop doesn't count) |
+   | `always` | restarts no matter how it exits (including a clean stop) |
+
+   `StartLimitBurst=5` / `StartLimitIntervalUSec=10s` = the rate limit "stop if there are more than 5 restart attempts within 10 seconds".
+9. **Debugging a broken service:** a deliberately non-existent `EnvironmentFile` was added to the unit file:
+   ```
+   $ sudo sed -i '/ExecStart=/i EnvironmentFile=/etc/logger-demo-env-yok' /etc/systemd/system/logger-demo.service
+   $ sudo systemctl daemon-reload
+   $ sudo systemctl restart logger-demo
+   Job for logger-demo.service failed...
+   $ systemctl status logger-demo
+   Active: activating (auto-restart) (Result: resources)
+   ```
+   A few seconds later the rate limit kicks in:
+   ```
+   × logger-demo.service - Demo heartbeat logger v2
+        Active: failed (Result: resources) since ...; 12s ago
+   Sep 26 15:22:30 lev-k systemd[1]: logger-demo.service: Scheduled restart job, restart counter is at 5.
+   Sep 26 15:22:30 lev-k systemd[1]: logger-demo.service: Start request repeated too quickly.
+   Sep 26 15:22:30 lev-k systemd[1]: logger-demo.service: Failed with result 'resources'.
+   ```
+   | Symbol | Meaning |
+   |---|---|
+   | `●` | healthy/active |
+   | `○` | inactive |
+   | `×` | failed |
+
+   The `resources` result category means the failure came from systemd's process-launching machinery, not the process's own exit code (here: the `EnvironmentFile` couldn't be read). Other categories: `exit-code`, `signal`, `timeout`, `core-dump`.
+   ```
+   $ systemctl is-failed logger-demo
+   failed
+   $ sudo systemctl reset-failed logger-demo
+   $ systemctl is-failed logger-demo
+   inactive
+   ```
+   Without `reset-failed`, even a restart attempt would be rejected (the rate limit is still active). After fixing the root cause (the `-` prefix, see 2.11), it was restarted again:
+   ```
+   $ sudo sed -i 's#EnvironmentFile=/etc/logger-demo-env-yok#EnvironmentFile=-/etc/logger-demo-env-yok#' /etc/systemd/system/logger-demo.service
+   $ sudo systemctl daemon-reload
+   $ sudo systemctl restart logger-demo
+   $ systemctl is-failed logger-demo
+   active
+   ```
+   Log evidence (`-p err` = only error+ severity):
+   ```
+   $ journalctl -u logger-demo -p err
+   Sep 26 15:22:30 lev-k systemd[1]: logger-demo.service: Failed to load environment files: No such file or directory
+   Sep 26 15:22:30 lev-k systemd[1]: Failed to start logger-demo.service - Demo heartbeat logger v2.
+   ```
+   This pair of lines repeats 5 times — matching `StartLimitBurst=5` exactly.
 
 ## Relationship to Kubernetes
 
@@ -1336,5 +1408,13 @@ Right order: **`find -uid` → delete/`chown` → `deluser`**.
 # Part 11 — Cron & timers
 
 > 🔜 Placeholder — cron vs systemd timers.
+
+[↑ Go back to TOC](#table-of-contents)
+
+---
+
+# Part 12 — Memory & I/O
+
+> 🔜 Placeholder — page cache, dirty pages, background writeback, `fsync`/`fdatasync`, `/proc/sys/vm/*`. Split out of Process management (Part 5) into its own section.
 
 [↑ Go back to TOC](#table-of-contents)
