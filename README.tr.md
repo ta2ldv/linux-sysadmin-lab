@@ -49,15 +49,19 @@ Bu lab'ın uzun vadeli hedefi virtualization ve Kubernetes. Buradaki hemen her b
 
 # Bölüm 0 — Linux dosya yapısı
 
-Makine: Ubuntu 24.04 (AWS). Bu bölüm lab pratiği değil, standart FHS (Filesystem Hierarchy Standard) referansı.
+Makine: Ubuntu 24.04 (AWS), mimari amd64 (doğrulandı — bkz. 0.9). Bu bölüm lab pratiği değil, standart FHS (Filesystem Hierarchy Standard) referansı.
 
 ## Cheat sheet
 
 | Dizin | Ne saklar | Kalıcı mı | Kim yazar |
 |-------|-----------|-----------|-----------|
-| `/etc` | sistem geneli config dosyaları (text) | kalıcı | root, paketler kurulumda |
+| `/etc` | sistem geneli config dosyaları (text) + override katmanı | kalıcı | root, paketler kurulumda |
+| `/boot` | kernel image, initramfs, bootloader config | kalıcı | kernel paketi, `update-grub` |
 | `/var` | değişen veri: log, cache, spool, db | kalıcı | servisler, root |
 | `/usr` | kurulu programlar + kütüphaneler + paylaşılan data | kalıcı, apt'ın yönettiği alan | paket yöneticisi (apt) |
+| `/usr/bin` | herkesin (normal user) çalıştırdığı komutlar | kalıcı, apt-managed | paket yöneticisi |
+| `/usr/sbin` | admin/root'un çalıştırdığı komutlar | kalıcı, apt-managed | paket yöneticisi |
+| `/usr/lib` | kütüphaneler + programların iç binary'leri (sadece `.so` değil) | kalıcı, apt-managed | paket yöneticisi |
 | `/bin` | temel komutlar (`ls`, `cat`...) — Ubuntu'da `/usr/bin`'e symlink | kalıcı | paket yöneticisi |
 | `/home` | user'ların kişisel dosyaları | kalıcı | user'ın kendisi |
 | `/tmp` | kısa ömürlü geçici dosyalar | periyodik temizlenir (`systemd-tmpfiles`), dağıtıma göre tmpfs ya da disk (bu makinede: disk — bkz. 0.4) | herkes (world-writable, sticky bit) |
@@ -65,29 +69,36 @@ Makine: Ubuntu 24.04 (AWS). Bu bölüm lab pratiği değil, standart FHS (Filesy
 | `/proc` | çalışan process'ler + kernel durumu — gerçek dosya değil, kernel'in canlı görünümü | RAM'de, disk'te yok | kernel |
 | `/sys` | kernel'in device/driver bilgisini export ettiği sanal fs | RAM'de, disk'te yok | kernel |
 | `/dev` | device node'ları (`/dev/sda`, `/dev/null`, `/dev/tty1`...) | RAM'de (devtmpfs), disk'te yok | kernel (udev) |
+| `/mnt` | admin'in elle/geçici mount ettiği yer | kalıcı (mount edilmediyse boş) | admin, cloud-init (instance store) |
+| `/media` | removable media (USB/CD) otomatik mount noktası | kalıcı (headless sunucuda genelde boş) | udisks2 (otomatik mount) |
 | `/lib` | kernel modülleri + temel programların shared library'leri — Ubuntu'da `/usr/lib`'e symlink | kalıcı | paket yöneticisi |
+| `/lib64` | 64-bit ELF interpreter için sabit yol — `/usr/lib64`'e symlink | kalıcı | paket yöneticisi (usrmerge) |
 
 ## 0.1 — Dizin ağacı (genel bakış)
 
 ```
-/
-|-- bin -> usr/bin              # symlink (usrmerge)
-|-- sbin -> usr/sbin             # symlink (usrmerge)
-|-- lib -> usr/lib               # symlink (usrmerge)
-|-- etc/                         # sistem geneli config, text
-|-- usr/                         # apt-managed: programlar, kütüphaneler, paylaşılan data
-|-- var/                         # kalıcı, değişen veri
-|   |-- log/                     # log dosyaları
-|   |-- lib/                     # servis state/data (kalıcı)
-|   `-- tmp/                     # /tmp'den daha uzun tutulan geçici dosya, her zaman disk
-|-- tmp/                         # kısa ömürlü geçici dosya (bu makinede: disk, tmpfs değil -- bkz. 0.4)
-|-- opt/                         # apt dışı, 3rd-party yazılım
-|-- home/                        # user home dizinleri
-|-- root/                        # root kullanıcısının home'u, /home'dan ayrı
-|-- proc/                        # sanal, kernel process görünümü -- disk'te yok
-|-- sys/                         # sanal, kernel device/driver görünümü -- disk'te yok
-|-- dev/                         # device node'ları (devtmpfs) -- disk'te yok
-`-- run/                         # tmpfs, runtime veri -- her boot'ta sıfırdan yaratılır
+/ ─┬─ bin/ -> usr/bin              # symlink (usrmerge)
+   ├─ sbin/ -> usr/sbin            # symlink (usrmerge)
+   ├─ lib/ -> usr/lib              # symlink (usrmerge)
+   ├─ lib64/ -> usr/lib64          # symlink, 64-bit ELF interpreter sabit yolu -- bkz. 0.9
+   ├─ boot/                        # kernel image, initramfs, bootloader -- bkz. 0.10
+   ├─ etc/                         # sistem geneli config, text + override katmanı -- bkz. 0.6
+   ├─ usr/ ─┬─ bin/                # herkesin çalıştırdığı komutlar -- bkz. 0.7
+   │        ├─ sbin/               # admin'in çalıştırdığı komutlar -- bkz. 0.7
+   │        └─ lib/                # kütüphaneler + programın iç binary'leri -- bkz. 0.7
+   ├─ var/ ─┬─ log/                # log dosyaları
+   │        ├─ lib/                # servis state/data, kalıcı
+   │        └─ tmp/                # /tmp'den uzun tutulan geçici dosya, her zaman disk
+   ├─ tmp/                         # kısa ömürlü geçici dosya -- bu makinede disk, tmpfs değil, bkz. 0.4
+   ├─ opt/                         # apt dışı, 3rd-party yazılım
+   ├─ home/                        # user home dizinleri
+   ├─ root/                        # root kullanıcısının home'u, /home'dan ayrı
+   ├─ proc/                        # sanal, kernel process görünümü -- disk'te yok
+   ├─ sys/                         # sanal, kernel device/driver görünümü -- disk'te yok
+   ├─ dev/                         # device node'ları (devtmpfs) -- disk'te yok
+   ├─ mnt/                         # admin'in elle mount ettiği yer -- bkz. 0.8
+   ├─ media/                       # removable media otomatik mount noktası -- bkz. 0.8
+   └─ run/                         # tmpfs, runtime veri -- her boot'ta sıfırdan yaratılır
 ```
 
 ## 0.2 — `/bin` ve `/lib` neden symlink
@@ -145,11 +156,101 @@ Kaynaklar:
 - https://www.debian.org/releases/trixie/release-notes/issues.en.html
 - https://github.com/systemd/systemd/blob/main/units/tmp.mount
 
+## 0.5 — Büyük resim: sistemi birbirine bağlayan 3 mantık
+
+Bu dizinleri ezbere bir liste olarak değil, "neden böyle bölünmüşler" sorusuna cevap veren 3 prensip olarak görmek gerekiyor. Aşağıdaki her alt bölüm bunlardan birinin detayı.
+
+| Prensip | Özet | Detay |
+|---|---|---|
+| `/etc` = override katmanı | `/usr` = yazılım nasıl geldiyse öyle duruyor, `/etc` = bu makineye özel ayarladığın kısım | 0.6 |
+| `/usr` içi bölünme = kim çalıştırıyor | `bin` = herkes, `sbin` = admin, `lib` = programın kendisi | 0.7 |
+| `/dev` ↔ mount noktaları | `/dev/sdb1` donanımın kendisi, `/mnt`/`/media` o donanıma açılan boş kapı | 0.8 |
+
+## 0.6 — `/etc`: override katmanı
+
+Bölüm 2'de (systemd) görülen `/usr/lib` (vendor default) vs `/etc` (admin override) mantığı, aslında tüm Linux'a genellenmiş bir kalıp: `/usr` = paket ne getirdiyse öyle durur, `/etc` = bu makineye özel yaptığın değişiklik. `<paket>.d/` drop-in kalıbı bunun her yerde tekrar eden somut hali: `apt.conf.d`, `sudoers.d`, `cron.d`, `journald.conf.d` (Bölüm 3), systemd unit override'ları (Bölüm 2) — hepsi aynı fikir.
+
+| Kalıp | Ne işe yarar | Örnek |
+|---|---|---|
+| `/etc/<x>.d/` drop-in | paket dosyasına dokunmadan ekleme yapmak | `/etc/systemd/journald.conf.d/99-lab.conf` |
+| `/etc/default/<servis>` | Debian'a özgü, `KEY=value` shell formatında başlangıç parametresi dosyası (config değil) — servisin init script/unit'i başlarken bunu source eder | `/etc/default/grub`, `/etc/default/useradd` |
+| `/etc/init.d/` + `/etc/rc?.d/` | SysV kalıntısı; native systemd unit'i olmayan bir script'i `systemd-sysv-generator` boot'ta sanal unit'e çevirir (`systemctl status`'ta "Loaded: ... generated" yazar) | 24.04'te hâlâ 15-20 script |
+
+İstisna: "`/etc` hep text'tir" kuralının tek istisnası `/etc/ld.so.cache` — o binary.
+
+Kaynak: FHS 3.0 §3.7, `man 8 systemd-sysv-generator`
+
+## 0.7 — `/usr` içi bölünme: kim çalıştırıyor, ne için
+
+| Dizin | Kim çalıştırır | Örnek |
+|---|---|---|
+| `/usr/bin` | herkes (normal user) | `ls`, `cat` |
+| `/usr/sbin` | admin/root ("system binaries") | `useradd`, `sshd`, `reboot` |
+| `/usr/lib` | programın kendisi (library + iç binary'ler, sadece `.so` değil) | `*.so` dosyaları, `/usr/lib/systemd/systemd`, `/usr/lib/apt/methods/` |
+
+"sbin"'deki s = system. Ayrım tarihsel olarak "root'un PATH'inde olsun, normal user'ınkinde olmasın" içindi; bugün pratikte aşınmış (Ubuntu ikisini de PATH'e koyuyor, Fedora 42 bin/sbin'i birleştirdi) ama isimlendirme mantığı hâlâ bu.
+
+Kaynak: FHS 3.0 §4.4-4.7, `man 7 hier`
+
+## 0.8 — `/dev` ↔ mount noktaları
+
+- `/dev/sdb1` gibi bir şey donanımın KENDİSİ — kernel'in "bu disk burada" dediği ham arayüz, içine yazmak/okumak doğrudan donanımla konuşmak demek.
+- `/mnt`, `/media` gibi dizinler ise BOŞ KAPILAR — bir device'ın (`/dev/sdb1`) içindeki dosya sistemini bu kapıya "mount" edince, diskin içeriğini normal bir klasör gibi gezebiliyorsun.
+- Yani: `/dev` = donanım, `/mnt`/`/media` = o donanımın içeriğine açılan pencere. `mount /dev/sdb1 /mnt/usb` dediğinde ikisini birbirine bağlıyorsun.
+
+| Dizin | Kim mount eder | Ne zaman |
+|---|---|---|
+| `/mnt` | admin, elle/geçici | AWS'de instance store (ephemeral disk) varsa cloud-init default olarak buraya mount eder |
+| `/media` | udisks2, otomatik | removable media (USB/CD), genelde `/media/<user>/<label>` — FHS'e 2004'te (FHS 2.3) eklendi çünkü `/mnt` ikisi için karışık kullanılıyordu |
+
+Sunucuda (bizim makine gibi, headless) `/media` genelde BOŞ kalır — masaüstü otomatik-mount senaryosu yok. `/mnt` AWS'de hâlâ kullanımda.
+
+Kaynak: FHS 3.0 §3.11-3.12, cloud-init docs (mounts modülü)
+
+## 0.9 — `/lib32` ve `/lib64`: canlı doğrulama
+
+Bu makine amd64:
+
+```
+$ dpkg --print-architecture
+amd64
+$ ls -la /lib64 /lib32
+ls: cannot access '/lib32': No such file or directory
+lrwxrwxrwx 1 root root 9 Apr 22  2024 /lib64 -> usr/lib64
+```
+
+Ubuntu (Debian ailesi) "multiarch" kullanır — kütüphaneler triplet dizinlerinde durur: `/usr/lib/x86_64-linux-gnu/`. `/lib64` yine de her amd64 sistemde vardır ama içinde TEK ŞEY olur: `ld-linux-x86-64.so.2` (symlink) — çünkü x86-64 ABI her 64-bit ELF binary'ye interpreter yolunu SABİT `/lib64/ld-linux-x86-64.so.2` olarak gömer, o yol yoksa hiçbir binary çalışmaz.
+
+`/lib32` sadece eski `libc6-i386` (32-bit uyumluluk) paketi kurulunca oluşur; bizim makinede kurulu değil, o yüzden yok (normal, beklenen durum).
+
+| Mimari | `/lib64` | Neden |
+|---|---|---|
+| amd64 (bu makine) | var, symlink → `/usr/lib64` | ABI sabit interpreter yolu gerektiriyor |
+| arm64 | olmayabilir | farklı interpreter yolu kullanır |
+
+Kaynak: FHS 3.0 §3.10/§4.8, https://wiki.debian.org/Multiarch/Implementation
+
+## 0.10 — `/boot` (Ubuntu 24.04, AWS)
+
+| Dosya | Ne |
+|---|---|
+| `vmlinuz-*` | sıkıştırılmış kernel image (AWS'de `linux-aws` flavor) |
+| `initrd.img-*` | initramfs — root fs mount edilmeden ÖNCE çalışan "early userspace", disk sürücülerini (nvme/ena) yükleyip `/`'i bulur, `switch_root` yapar (0.2'deki "initramfs `/usr`'ı erken mount eder" cümlesinin somut karşılığı) |
+| `config-*` | kernel'in derleme seçenekleri |
+| `System.map-*` | kernel sembol tablosu (crash/debug için) |
+| `vmlinuz`, `initrd.img`, `*.old` | son/önceki kernel'e symlink |
+| `grub/grub.cfg` | bootloader menüsü — ÜRETİLEN dosya, elle düzenlenmez; `/etc/default/grub` + `/etc/grub.d/`'den `update-grub` ile üretilir |
+| `/boot/efi` | UEFI ESP (FAT) mount noktası (instance BIOS boot ediyorsa boş) |
+
+Kaynak: `man 8 update-grub`, `man 7 bootup`, FHS 3.0 §3.5
+
 ## Notlar
 
-- `/etc` içindeki her şey neredeyse hep text config'tir, binary olmaz — bu bir kural değil ama yaygın kabul.
 - `/usr` altı apt'ın yönettiği alandır: apt install ettiğin her şey buraya düşer, elle dokunulmaz.
 - Servis hesaplarının home'u genelde `/nonexistent` ya da `/var/lib/<servis>` olur, `/home` altında değil (bkz. Bölüm 4).
+- `/etc/ld.so.cache` — "`/etc` hep text'tir" kuralının bilinen tek istisnası, kendisi binary.
+- `grub.cfg` elle düzenlenmez — `update-grub` her çalıştığında üzerine yazar; değişiklik `/etc/default/grub` veya `/etc/grub.d/`'den yapılır.
+- `/lib32`'nin bu makinede olmaması normal ve beklenen: `libc6-i386` paketi kurulu değil.
 
 [↑ İçindekilere dön](#i̇çindekiler)
 
@@ -490,6 +591,293 @@ Süreç:
    ```
    Bu satır çifti 5 kere tekrarlanmış — `StartLimitBurst=5` ile birebir eşleşiyor.
 
+## 2.8 — `daemon-reload`: ne zaman gerekli
+
+systemd yeni bir unit dosyası oluştuğunda `inotify` ile otomatik farkına varır (uyarı yok); var olan bir dosya değişince farkına varmaz, uyarı verir. `daemon-reload` TÜM unit dosyalarını (aktif/inaktif hepsini) yeniden tarar, hiçbir process'i durdurmaz/başlatmaz — sadece systemd'nin unit bilgisini günceller.
+
+```
+$ sudo sed -i 's/Description=Demo heartbeat logger/Description=Demo heartbeat logger v2/' /etc/systemd/system/logger-demo.service
+$ systemctl status logger-demo
+Warning: The unit file, source configuration file or drop-ins of logger-demo.service changed on disk. Run 'systemctl daemon-reload' to reload units.
+● logger-demo.service - Demo heartbeat logger
+     Active: active (running) since Sat 2026-09-26 15:04:46 UTC; 1min 32s ago
+   Main PID: 2543 (logger-demo.sh)
+
+$ sudo systemctl daemon-reload
+$ systemctl status logger-demo
+● logger-demo.service - Demo heartbeat logger v2
+     Active: active (running) since Sat 2026-09-26 15:04:46 UTC; 3min 52s ago
+   Main PID: 2543 (logger-demo.sh)
+```
+
+| Durum | Ne olur |
+|---|---|
+| yeni unit dosyası oluşturulur | otomatik yüklenir (inotify), uyarı yok |
+| var olan unit dosyası değiştirilir | otomatik yüklenmez, "changed on disk" uyarısı çıkar |
+| `daemon-reload` | tüm unit dosyalarını yeniden tarar; Main PID/since **değişmez** — ExecStart= değişse bile process eski komutla çalışmaya devam eder, ayrıca `restart` gerekir |
+
+## 2.9 — `Type=` semantiği
+
+`[Service]` içinde `Type=` hiç yazılmasa da systemd her zaman bir değer hesaplar; default `simple` (`man 5 systemd.service`).
+
+```
+$ systemctl show logger-demo -p Type
+Type=simple
+$ systemctl show ssh -p Type
+Type=notify
+```
+
+`ssh` gerçekten `sd_notify` protokolünü desteklediği için elle `Type=notify` yazılmış (bkz. `systemctl cat ssh`, 2.13).
+
+| `Type=` | Davranış |
+|---|---|
+| `simple` (default) | `ExecStart=` fork edilir edilmez started sayılır |
+| `exec` | `simple`'a benzer, process gerçekten `exec()` edilene kadar bekler |
+| `forking` | ana process kendini fork edip arka plana atınca started sayılır (`PIDFile=` ile gerçek PID bildirilir) |
+| `oneshot` | process bitince (exit) started sayılır; `RemainAfterExit=yes` ile "active" görünmeye devam eder |
+| `notify` | process kendi `READY=1` mesajıyla systemd'ye haber verir |
+
+## 2.10 — `Wants=`/`Requires=` vs `After=`/`Before=`
+
+`Wants=`/`Requires=` = "buna ihtiyaç var mı" (varlık/yokluk, otomatik başlatır). `After=`/`Before=` = "hangi sırada" (sadece zamanlama, hiçbir şeyi başlatmaz). Birbirinden bağımsız — genelde ikisi birlikte yazılır (`Wants=X` + `After=X`).
+
+Tuzak: `network.target` = "ağ hazır" DEMEK DEĞİL, sadece "ağ altyapısı tetiklendi". Gerçek "ağ hazır" garantisi için `network-online.target` + `Wants=network-online.target` gerekir (AWS/cloud-init ortamlarında sık karşılaşılan sorun).
+
+```
+$ systemctl cat ssh
+...
+After=network.target auditd.service
+```
+
+(Sadece `After` var, `Wants`/`Requires` yok — ssh, `network.target`'ın zaten başka bir yerden başlatıldığını varsayıyor, kendisi başlatmıyor.)
+
+```
+$ cat /usr/lib/systemd/system/basic.target
+[Unit]
+Description=Basic System
+Documentation=man:systemd.special(7)
+Requires=sysinit.target
+Wants=sockets.target timers.target paths.target slices.target
+After=sysinit.target sockets.target paths.target slices.target tmp.mount
+RequiresMountsFor=/var /var/tmp
+Wants=tmp.mount
+```
+
+`Requires=sysinit.target` + `After=sysinit.target` ikisi birlikte — "eşleştirme" kalıbının kanıtı. `/var`, `/var/tmp` ZORUNLU (`RequiresMountsFor=`), `/tmp` sadece ESNEK (`Wants=tmp.mount`) çünkü `tmp.mount` mask'lenmiş olabilir, bu hata sayılmamalı.
+
+`logger-demo`'nun kendi (implicit) bağımlılıkları:
+
+```
+$ systemctl show logger-demo -p After,Wants,Requires,WantedBy
+Requires=sysinit.target system.slice
+Wants=
+WantedBy=
+After=basic.target systemd-journald.socket sysinit.target system.slice
+```
+
+Biz `[Unit]`'te hiçbir şey yazmadık ama `Requires=`/`After=` dolu — `DefaultDependencies=yes` (default) systemd'nin otomatik eklediği implicit bağımlılıklar (`systemctl show logger-demo -p DefaultDependencies` → `yes`).
+
+`WantedBy=` boş çıktı — `[Install]`'da `WantedBy=multi-user.target` yazılı olmasına rağmen, çünkü bu sadece `enable` edilince (symlink oluşunca) GERÇEK bir bağa dönüşüyor; disabled iken boş. `[Install]` bölümü dosyada bir "niyet", gerçek bağ değil.
+
+## 2.11 — `-` prefix: hataları yut (`EnvironmentFile=-...`)
+
+`-` prefix'i = "bu dosya/komut hata verirse/yoksa görmezden gel". `EnvironmentFile=-/etc/x`, dosya olmasa bile servisi başlatmaya izin verir — case study'nin 9. adımındaki düzeltme buydu. Cron unit'inde de aynı kalıp var: `EnvironmentFile=-/etc/default/cron` (bkz. 2.7).
+
+```
+$ systemctl show logger-demo -p EnvironmentFile
+(boş — property adı yanlış, sessizce boş döner, hata vermez)
+$ systemctl show logger-demo -p EnvironmentFiles
+EnvironmentFiles=/etc/logger-demo-env-yok (ignore_errors=yes)
+```
+
+Doğru/gerçek property adı ÇOĞUL: `EnvironmentFiles`. `-` prefix, `ignore_errors=yes` flag'ine dönüşüyor.
+
+Tam döngü doğrulaması — gerçek env dosyası + drop-in `Environment=` birlikte test edildi:
+
+```
+$ echo 'REAL_VAR=merhaba' | sudo tee /etc/logger-demo-env-yok
+$ journalctl -u logger-demo -n 3
+... heartbeat #0 - DEMO_VAR=hello REAL_VAR=merhaba
+```
+
+İkisi de (`Environment=` drop-in'den, `EnvironmentFile=` gerçek dosyadan) doğru şekilde process'e enjekte edildi.
+
+## 2.12 — cgroup: `systemd-cgls`, `stop` vs çıplak `kill`, SIGTERM vs SIGKILL
+
+systemd her servisi kendi cgroup'unda çalıştırır; `stop` sadece Main PID'i değil TÜM cgroup'u öldürür, çocuk process'ler (örn. `sleep`) öksüz kalmaz.
+
+```
+$ systemd-cgls /system.slice/logger-demo.service
+CGroup /system.slice/logger-demo.service:
+├─3346 /bin/bash /usr/local/bin/logger-demo.sh
+└─3379 sleep 5
+```
+
+Canlı test — main PID'i çıplak `kill` ile öldürmek (`systemctl stop` değil):
+
+```
+$ sudo kill 3346        # SIGTERM, default
+→ Active: inactive (dead), "Deactivated successfully" — RESTART TETİKLENMEDİ
+```
+
+Sebep (`man 5 systemd.service`, `Restart=on-failure` tanımı): "is terminated by a signal (excluding SIGHUP, SIGINT, SIGTERM, SIGPIPE)". `SIGTERM` kasıtlı olarak "temiz kapanış" sayılıyor çünkü systemd'nin kendi `stop` komutu da `SIGTERM` kullanıyor — çıplak `kill` = `systemctl stop` ile aynı sayılıyor.
+
+```
+$ sudo kill -9 <PID>    # SIGKILL, istisna listesinde değil
+Sep 26 15:28:08 lev-k systemd[1]: logger-demo.service: Scheduled restart job, restart counter is at 1.
+Sep 26 15:28:08 lev-k systemd[1]: Started logger-demo.service - Demo heartbeat logger v2.
+→ RESTART TETİKLENDİ, yeni PID, heartbeat #0'dan başladı.
+```
+
+| Sinyal | `Restart=on-failure` tetikler mi |
+|---|---|
+| `SIGTERM`, `SIGINT`, `SIGHUP`, `SIGPIPE` | hayır — temiz kapanış sayılır |
+| `SIGKILL` ve diğer tüm sinyaller | evet |
+
+Not: Bölüm 2.1'deki `kill -9 1` düzeltmesiyle aynı kaynak (`man 7 signal`) — SIGKILL handler kurulamayan tek sinyal, PID 1 hariç her process'te doğrudan öldürür.
+
+## 2.13 — `systemctl cat`: unit + drop-in'leri birleşik görmek
+
+Unit + tüm drop-in'lerini birleşik/etkin haliyle, kaynak dosya yollarını yorum satırı olarak göstererek basar (sadece concatenation, override kararını kendisi vermez).
+
+```
+$ systemctl cat ssh
+# /usr/lib/systemd/system/ssh.service
+[Unit]
+Description=OpenBSD Secure Shell server
+Documentation=man:sshd(8) man:sshd_config(5)
+After=network.target auditd.service
+ConditionPathExists=!/etc/ssh/sshd_not_to_be_run
+
+[Service]
+EnvironmentFile=-/etc/default/ssh
+ExecStartPre=/usr/sbin/sshd -t
+ExecStart=/usr/sbin/sshd -D $SSHD_OPTS
+ExecReload=/usr/sbin/sshd -t
+ExecReload=/bin/kill -HUP $MAINPID
+KillMode=process
+Restart=on-failure
+RestartPreventExitStatus=255
+Type=notify
+RuntimeDirectory=sshd
+RuntimeDirectoryMode=0755
+
+[Install]
+WantedBy=multi-user.target
+Alias=sshd.service
+
+# /usr/lib/systemd/system/ssh.service.d/ec2-instance-connect.conf
+[Service]
+ExecStart=
+ExecStart=/usr/sbin/sshd -D -o "AuthorizedKeysCommand /usr/share/ec2-instance-connect/eic_run_authorized_keys %%u %%f" -o "AuthorizedKeysCommandUser ec2-instance-connect" $SSHD_OPTS
+```
+
+Önemli detay: drop-in'de `ExecStart=` İKİ KERE — önce BOŞ (= "şu ana kadar birikeni sıfırla"), sonra yeni değer. `ExecStart=` gibi bazı directive'ler normalde "biriktirici" (cumulative); boş satır olmadan üst üste yazsan ikisi de çalışmaya çalışırdı. Bu, AWS'in EC2 Instance Connect paketinin orijinal `sshd` komutunu TAMAMEN DEĞİŞTİRMEK için kullandığı resmi teknik.
+
+| | `logger-demo.service` | `ssh.service` |
+|---|---|---|
+| Ana dosya | `/etc/systemd/system/` — biz elle yazdık | `/usr/lib/systemd/system/` — paket kurmuş |
+| Override/drop-in | `/etc/systemd/system/logger-demo.service.d/` (bkz. 2.14) | `/usr/lib/systemd/system/ssh.service.d/` (`ec2-instance-connect` paketi kurmuş) |
+
+Genel kural: `/usr/lib/` = vendor/paket katmanı (`apt upgrade` üzerine yazabilir), `/etc/` = admin katmanı (apt asla dokunmaz, override'ların hep buraya). Aynı isimli unit varsa `/etc/` kazanır.
+
+## 2.14 — Drop-in dosyalar ve `systemctl edit`
+
+Unit dosyasının kendisini değiştirmeden davranışını override etmenin resmi yolu.
+
+```
+$ sudo systemctl edit logger-demo
+→ editör açar, [Service] altına Environment=DEMO_VAR=hello yazıldı, kaydedildi.
+"Successfully installed edited file '/etc/systemd/system/logger-demo.service.d/override.conf'."
+```
+
+(`daemon-reload`'u kendisi tetikliyor, elle yapmaya gerek yok — `sudo tee`'den farkı bu.)
+
+```
+$ cat /etc/systemd/system/logger-demo.service.d/override.conf
+[Service]
+Environment=DEMO_VAR=hello
+$ systemctl show logger-demo -p Environment
+Environment=DEMO_VAR=hello
+```
+
+Doğrulama 2.11'deki tam döngü testinde tamamlandı — hem `Environment=` hem `EnvironmentFile=` process'e gerçekten enjekte edildiği `journalctl`'de görüldü.
+
+## 2.15 — `mask`/`unmask`
+
+`mask` = `disable`'dan daha güçlü; `/etc/systemd/system/<unit>` yoluna `/dev/null` symlink'i koyar — elle `start` bile imkansız hale gelir. `unmask` symlink'i kaldırır, eski hâle döner.
+
+Tuzak: `logger-demo`'nun GERÇEK dosyası zaten `/etc/`'de olduğu için doğrudan `mask` denenince hata verdi:
+
+```
+$ sudo systemctl mask logger-demo
+Failed to mask unit: File /etc/systemd/system/logger-demo.service already exists.
+```
+
+(`logger-demo`'ya dokunulmadı, sağlam kaldı — `--force` de bu durumu etkilemiyor: `man systemctl`'e göre `--force` esas olarak `enable`/`link`/`unmask`'te symlink çakışması çözmek için, `mask`'te gerçek dosyanın üzerine yazmıyor.)
+
+Ayrı bir dummy (`mask-test.service`) ile, `/usr/lib/systemd/system/`'e taşıyıp (paket kurmuş gibi) gerçekçi senaryo test edildi:
+
+```
+$ sudo systemctl mask mask-test
+Created symlink /etc/systemd/system/mask-test.service → /dev/null.
+$ sudo systemctl start mask-test
+Failed to start mask-test.service: Unit mask-test.service is masked.
+```
+
+(`disable` olsa elle `start` çalışırdı, `mask`'te çalışmıyor — asıl fark burada.)
+
+```
+$ sudo systemctl unmask mask-test
+Removed "/etc/systemd/system/mask-test.service".
+$ sudo systemctl start mask-test
+$ systemctl status mask-test
+○ mask-test.service - Mask test dummy
+     Loaded: loaded (/usr/lib/systemd/system/mask-test.service; static)
+     Active: inactive (dead)
+```
+
+(`/usr/lib/`'deki orijinal otomatik bulundu, içerik hiç kaybolmadı — başarıyla çalıştı.)
+
+Not: `static` enablement state — `[Install]` bölümü olmayan unit'ler böyle görünür, `enable`/`disable` edilemezler, sadece elle veya bağımlılık üzerinden başlatılabilirler.
+
+## 2.16 — `is-enabled` / `is-active` / `is-failed`
+
+```
+$ systemctl is-enabled logger-demo
+disabled
+$ systemctl is-active logger-demo
+active
+$ systemctl is-failed logger-demo
+active
+```
+
+Dikkat: `is-failed` de aslında `ActiveState`'i basıyor — "failed değil" gibi ayrı bir kelime yok, sadece EXIT CODE'u farklı (0 = gerçekten failed, değilse ≠0). Script'lerde `$?` ile kontrol edilir, basılan kelimeyle değil. Hepsi otomasyon/script dostu: tek kelime + anlamlı exit code döner.
+
+## 2.17 — `list-unit-files` / `list-dependencies` / `list-units`
+
+```
+$ systemctl list-unit-files | grep logger-demo
+logger-demo.service                            disabled        enabled
+```
+
+İki sütun: STATE (gerçek, şu anki durum — boot davranışını bu belirler) vs VENDOR PRESET (`/usr/lib/systemd/system-preset/*.preset` dosyalarından gelen ÖNERİ, hiçbir zorlayıcı etkisi yok, sadece `systemctl preset` komutuyla uygulanır).
+
+```
+$ systemctl list-dependencies logger-demo
+logger-demo.service
+● ├─system.slice
+● └─sysinit.target
+●   ├─apparmor.service
+●   ├─blk-availability.service
+    ...
+●   ├─local-fs.target
+●   │ ├─-.mount
+●   │ ├─boot-efi.mount
+```
+
+Semboller: `●` = aktif/çalışıyor, `○` = inactive (bazı unit'ler `oneshot`, boot'ta bir kere çalışıp kapanmış olması normal). `list-dependencies` varsayılan olarak recursive — target'lar kendi bağımlılıklarını da açar (`local-fs.target` altında mount'lar gibi).
+
 ## Kubernetes ile ilişkisi
 
 - Bir Kubernetes node'unda `kubelet`, host üzerinde systemd tarafından yönetilen sıradan bir servis; `systemctl status kubelet` / `journalctl -u kubelet -f` bu bölümde öğrenilenle birebir aynı.
@@ -509,6 +897,9 @@ Süreç:
 - `start` ve `enable` bağımsız: `start` şimdi çalıştırır, `enable` boot'ta çalıştırır. Birini yapmak diğerini yapmaz.
 - `.wants`/`.requires` dizinlerinin içi hep sadece symlink; unit dosyasının kendisi `/etc/systemd/system/` ya da `/usr/lib/systemd/system/`'de durur.
 - Reboot test'i process state'in korunmadığını gösterdi (yeni PID); korunan tek şey enable durumu (symlink var mı yok mu).
+- `daemon-reload` metadata'yı günceller, process'i asla restart etmez — `ExecStart=` değişikliğinin etkili olması için ayrıca `restart` gerekir.
+- `systemctl show -p <property>` D-Bus üzerinden expose edilen GERÇEK property adını ister, unit dosyasındaki directive adıyla birebir aynı olmayabilir (örn. `EnvironmentFile=` directive'i → `EnvironmentFiles` property'si, çoğul). Yanlış/tanınmayan property adı sessizce boş döner, hata vermez.
+- `mask` gerçek dosya `/etc/systemd/system/`'de zaten varsa başarısız olur (`--force` bunu değiştirmez); `disable` ile `mask` arasındaki asıl fark, elle `start`'ın çalışıp çalışmaması.
 
 [↑ İçindekilere dön](#i̇çindekiler)
 

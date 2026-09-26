@@ -49,15 +49,19 @@ The longer-term goal behind this lab is virtualization and Kubernetes. Almost ev
 
 # Part 0 — Linux filesystem layout
 
-Machine: Ubuntu 24.04 (AWS). This part isn't lab practice, it's a standard FHS (Filesystem Hierarchy Standard) reference.
+Machine: Ubuntu 24.04 (AWS), architecture amd64 (verified — see 0.9). This part isn't lab practice, it's a standard FHS (Filesystem Hierarchy Standard) reference.
 
 ## Cheat sheet
 
 | Directory | Holds | Persistent | Written by |
 |-----------|-------|------------|------------|
-| `/etc` | system-wide config files (text) | persistent | root, packages at install time |
+| `/etc` | system-wide config files (text) + override layer | persistent | root, packages at install time |
+| `/boot` | kernel image, initramfs, bootloader config | persistent | kernel package, `update-grub` |
 | `/var` | data that changes: logs, cache, spool, databases | persistent | services, root |
 | `/usr` | installed programs + libraries + shared data | persistent, apt-managed | package manager (apt) |
+| `/usr/bin` | commands anyone (a normal user) runs | persistent, apt-managed | package manager |
+| `/usr/sbin` | commands the admin/root runs | persistent, apt-managed | package manager |
+| `/usr/lib` | libraries + programs' own internal binaries (not just `.so` files) | persistent, apt-managed | package manager |
 | `/bin` | core commands (`ls`, `cat`...) — symlink to `/usr/bin` on Ubuntu | persistent | package manager |
 | `/home` | users' personal files | persistent | the user themself |
 | `/tmp` | short-lived temporary files | cleaned periodically (`systemd-tmpfiles`), tmpfs or disk depending on the distro (on this machine: disk — see 0.4) | everyone (world-writable, sticky bit) |
@@ -65,29 +69,36 @@ Machine: Ubuntu 24.04 (AWS). This part isn't lab practice, it's a standard FHS (
 | `/proc` | running processes + kernel state — not a real file, a live view of the kernel | in RAM, not on disk | kernel |
 | `/sys` | virtual fs where the kernel exports device/driver info | in RAM, not on disk | kernel |
 | `/dev` | device nodes (`/dev/sda`, `/dev/null`, `/dev/tty1`...) | in RAM (devtmpfs), not on disk | kernel (udev) |
+| `/mnt` | admin's manual/temporary mount point | persistent (empty unless something is mounted) | admin, cloud-init (instance store) |
+| `/media` | auto-mount point for removable media (USB/CD) | persistent (usually empty on a headless server) | udisks2 (auto-mount) |
 | `/lib` | kernel modules + shared libraries for core programs — symlink to `/usr/lib` on Ubuntu | persistent | package manager |
+| `/lib64` | fixed path for the 64-bit ELF interpreter — symlink to `/usr/lib64` | persistent | package manager (usrmerge) |
 
 ## 0.1 — Directory tree (overview)
 
 ```
-/
-|-- bin -> usr/bin              # symlink (usrmerge)
-|-- sbin -> usr/sbin             # symlink (usrmerge)
-|-- lib -> usr/lib               # symlink (usrmerge)
-|-- etc/                         # system-wide config, text
-|-- usr/                         # apt-managed: programs, libraries, shared data
-|-- var/                         # persistent, changing data
-|   |-- log/                     # log files
-|   |-- lib/                     # service state/data (persistent)
-|   `-- tmp/                     # temp files kept longer than /tmp, always on disk
-|-- tmp/                         # short-lived temp files (on this machine: disk, not tmpfs -- see 0.4)
-|-- opt/                         # non-apt, 3rd-party software
-|-- home/                        # user home directories
-|-- root/                        # root user's home, separate from /home
-|-- proc/                        # virtual, kernel process view -- not on disk
-|-- sys/                         # virtual, kernel device/driver view -- not on disk
-|-- dev/                         # device nodes (devtmpfs) -- not on disk
-`-- run/                         # tmpfs, runtime data -- recreated from scratch on every boot
+/ ─┬─ bin/ -> usr/bin              # symlink (usrmerge)
+   ├─ sbin/ -> usr/sbin            # symlink (usrmerge)
+   ├─ lib/ -> usr/lib              # symlink (usrmerge)
+   ├─ lib64/ -> usr/lib64          # symlink, fixed path for the 64-bit ELF interpreter -- see 0.9
+   ├─ boot/                        # kernel image, initramfs, bootloader -- see 0.10
+   ├─ etc/                         # system-wide config, text + override layer -- see 0.6
+   ├─ usr/ ─┬─ bin/                # commands anyone runs -- see 0.7
+   │        ├─ sbin/               # commands the admin runs -- see 0.7
+   │        └─ lib/                # libraries + the program's own internal binaries -- see 0.7
+   ├─ var/ ─┬─ log/                # log files
+   │        ├─ lib/                # service state/data, persistent
+   │        └─ tmp/                # temp files kept longer than /tmp, always on disk
+   ├─ tmp/                         # short-lived temp files -- on this machine: disk, not tmpfs, see 0.4
+   ├─ opt/                         # non-apt, 3rd-party software
+   ├─ home/                        # user home directories
+   ├─ root/                        # root user's home, separate from /home
+   ├─ proc/                        # virtual, kernel process view -- not on disk
+   ├─ sys/                         # virtual, kernel device/driver view -- not on disk
+   ├─ dev/                         # device nodes (devtmpfs) -- not on disk
+   ├─ mnt/                         # admin's manual mount point -- see 0.8
+   ├─ media/                       # removable media auto-mount point -- see 0.8
+   └─ run/                         # tmpfs, runtime data -- recreated from scratch on every boot
 ```
 
 ## 0.2 — Why `/bin` and `/lib` are symlinks
@@ -145,11 +156,101 @@ Sources:
 - https://www.debian.org/releases/trixie/release-notes/issues.en.html
 - https://github.com/systemd/systemd/blob/main/units/tmp.mount
 
+## 0.5 — The big picture: 3 principles that tie the system together
+
+Instead of memorizing these directories as a flat list, it helps to see them as answers to "why is it split this way" — 3 principles, each detailed in its own subsection below.
+
+| Principle | Summary | Detail |
+|---|---|---|
+| `/etc` = the override layer | `/usr` = the software exactly as it shipped, `/etc` = the part you customized for this machine | 0.6 |
+| The split inside `/usr` = who runs it | `bin` = everyone, `sbin` = the admin, `lib` = the program itself | 0.7 |
+| `/dev` ↔ mount points | `/dev/sdb1` is the hardware itself, `/mnt`/`/media` are empty doors opened onto that hardware | 0.8 |
+
+## 0.6 — `/etc`: the override layer
+
+The `/usr/lib` (vendor default) vs `/etc` (admin override) logic seen in Part 2 (systemd) is actually a pattern generalized across all of Linux: `/usr` = stays exactly as the package shipped it, `/etc` = the change you made for this specific machine. The `<package>.d/` drop-in pattern is the concrete, repeating form of this: `apt.conf.d`, `sudoers.d`, `cron.d`, `journald.conf.d` (Part 3), systemd unit overrides (Part 2) — all the same idea.
+
+| Pattern | Purpose | Example |
+|---|---|---|
+| `/etc/<x>.d/` drop-in | add something without touching the package's own file | `/etc/systemd/journald.conf.d/99-lab.conf` |
+| `/etc/default/<service>` | Debian-specific, `KEY=value` shell-format startup parameter file (not config) — sourced by the service's init script/unit at start | `/etc/default/grub`, `/etc/default/useradd` |
+| `/etc/init.d/` + `/etc/rc?.d/` | SysV leftovers; a script with no native systemd unit gets turned into a virtual unit at boot by `systemd-sysv-generator` (`systemctl status` shows "Loaded: ... generated") | still 15-20 scripts on 24.04 |
+
+Exception: the one exception to "`/etc` is always text" is `/etc/ld.so.cache` — that one's binary.
+
+Source: FHS 3.0 §3.7, `man 8 systemd-sysv-generator`
+
+## 0.7 — The split inside `/usr`: who runs it, for whom
+
+| Directory | Who runs it | Example |
+|---|---|---|
+| `/usr/bin` | everyone (a normal user) | `ls`, `cat` |
+| `/usr/sbin` | admin/root ("system binaries") | `useradd`, `sshd`, `reboot` |
+| `/usr/lib` | the program itself (libraries + internal binaries, not just `.so` files) | `*.so` files, `/usr/lib/systemd/systemd`, `/usr/lib/apt/methods/` |
+
+The "s" in "sbin" = system. The split historically meant "should be on root's PATH, not a normal user's" — in practice that's eroded today (Ubuntu puts both on PATH, Fedora 42 merged bin/sbin), but the naming logic is still this.
+
+Source: FHS 3.0 §4.4-4.7, `man 7 hier`
+
+## 0.8 — `/dev` ↔ mount points
+
+- Something like `/dev/sdb1` is the hardware ITSELF — the kernel's raw interface saying "this disk is here"; reading/writing it means talking directly to the hardware.
+- Directories like `/mnt`, `/media` are EMPTY DOORS — once you "mount" the filesystem inside a device (`/dev/sdb1`) onto this door, you can browse the disk's contents like a normal folder.
+- So: `/dev` = hardware, `/mnt`/`/media` = the window opened onto that hardware's contents. `mount /dev/sdb1 /mnt/usb` connects the two.
+
+| Directory | Who mounts it | When |
+|---|---|---|
+| `/mnt` | admin, manually/temporarily | on AWS, if an instance store (ephemeral disk) exists, cloud-init mounts it here by default |
+| `/media` | udisks2, automatically | removable media (USB/CD), usually `/media/<user>/<label>` — added to FHS in 2004 (FHS 2.3) because `/mnt` was being used for both cases interchangeably |
+
+On a server (like ours, headless), `/media` usually stays EMPTY — there's no desktop auto-mount scenario. `/mnt` is still actively used on AWS.
+
+Source: FHS 3.0 §3.11-3.12, cloud-init docs (mounts module)
+
+## 0.9 — `/lib32` and `/lib64`: live verification
+
+This machine is amd64:
+
+```
+$ dpkg --print-architecture
+amd64
+$ ls -la /lib64 /lib32
+ls: cannot access '/lib32': No such file or directory
+lrwxrwxrwx 1 root root 9 Apr 22  2024 /lib64 -> usr/lib64
+```
+
+Ubuntu (the Debian family) uses "multiarch" — libraries live in triplet directories: `/usr/lib/x86_64-linux-gnu/`. `/lib64` still exists on every amd64 system, but holds exactly ONE thing: `ld-linux-x86-64.so.2` (a symlink) — because the x86-64 ABI hardcodes the interpreter path into every 64-bit ELF binary as the FIXED `/lib64/ld-linux-x86-64.so.2`; without that path, no binary runs.
+
+`/lib32` only appears once the legacy `libc6-i386` (32-bit compatibility) package is installed; it's not installed on our machine, so it's absent (normal, expected).
+
+| Architecture | `/lib64` | Why |
+|---|---|---|
+| amd64 (this machine) | present, symlink → `/usr/lib64` | the ABI requires a fixed interpreter path |
+| arm64 | may not exist | uses a different interpreter path |
+
+Source: FHS 3.0 §3.10/§4.8, https://wiki.debian.org/Multiarch/Implementation
+
+## 0.10 — `/boot` (Ubuntu 24.04, AWS)
+
+| File | What |
+|---|---|
+| `vmlinuz-*` | compressed kernel image (the `linux-aws` flavor on AWS) |
+| `initrd.img-*` | initramfs — the "early userspace" that runs BEFORE the root fs is mounted, loads disk drivers (nvme/ena), finds `/`, and `switch_root`s into it (the concrete counterpart of "initramfs mounts `/usr` early" from 0.2) |
+| `config-*` | the kernel's build options |
+| `System.map-*` | kernel symbol table (for crash/debug) |
+| `vmlinuz`, `initrd.img`, `*.old` | symlinks to the latest/previous kernel |
+| `grub/grub.cfg` | the bootloader menu — a GENERATED file, never hand-edited; produced by `update-grub` from `/etc/default/grub` + `/etc/grub.d/` |
+| `/boot/efi` | UEFI ESP (FAT) mount point (empty if the instance boots BIOS-style) |
+
+Source: `man 8 update-grub`, `man 7 bootup`, FHS 3.0 §3.5
+
 ## Notes
 
-- Almost everything under `/etc` is text config, not binary — not a hard rule, just the near-universal convention.
 - `/usr` is apt-managed territory: everything you `apt install` lands here, hands off otherwise.
 - Service accounts' home is usually `/nonexistent` or `/var/lib/<service>`, not under `/home` (see Part 4).
+- `/etc/ld.so.cache` — the one known exception to "`/etc` is always text", it's binary itself.
+- `grub.cfg` is never hand-edited — `update-grub` overwrites it every time it runs; make changes via `/etc/default/grub` or `/etc/grub.d/` instead.
+- `/lib32` being absent on this machine is normal and expected: the `libc6-i386` package isn't installed.
 
 [↑ Go back to TOC](#table-of-contents)
 
@@ -490,6 +591,293 @@ Process:
    ```
    This pair of lines repeats 5 times — matching `StartLimitBurst=5` exactly.
 
+## 2.8 — `daemon-reload`: when it's needed
+
+systemd notices a brand-new unit file automatically via `inotify` (no warning); it does not notice changes to an existing file, and prints a warning instead. `daemon-reload` rescans ALL unit files (active and inactive), and never stops/starts any process — it only refreshes systemd's unit metadata.
+
+```
+$ sudo sed -i 's/Description=Demo heartbeat logger/Description=Demo heartbeat logger v2/' /etc/systemd/system/logger-demo.service
+$ systemctl status logger-demo
+Warning: The unit file, source configuration file or drop-ins of logger-demo.service changed on disk. Run 'systemctl daemon-reload' to reload units.
+● logger-demo.service - Demo heartbeat logger
+     Active: active (running) since Sat 2026-09-26 15:04:46 UTC; 1min 32s ago
+   Main PID: 2543 (logger-demo.sh)
+
+$ sudo systemctl daemon-reload
+$ systemctl status logger-demo
+● logger-demo.service - Demo heartbeat logger v2
+     Active: active (running) since Sat 2026-09-26 15:04:46 UTC; 3min 52s ago
+   Main PID: 2543 (logger-demo.sh)
+```
+
+| Situation | What happens |
+|---|---|
+| a new unit file is created | loaded automatically (inotify), no warning |
+| an existing unit file is edited | not loaded automatically, "changed on disk" warning appears |
+| `daemon-reload` | rescans all unit files; Main PID/since **don't change** — even if `ExecStart=` changed, the process keeps running with the old command until it's also `restart`ed |
+
+## 2.9 — `Type=` semantics
+
+Even if `Type=` is never written in `[Service]`, systemd always computes a value for it; the default is `simple` (`man 5 systemd.service`).
+
+```
+$ systemctl show logger-demo -p Type
+Type=simple
+$ systemctl show ssh -p Type
+Type=notify
+```
+
+`ssh` has `Type=notify` written by hand because it genuinely supports the `sd_notify` protocol (see `systemctl cat ssh`, 2.13).
+
+| `Type=` | Behavior |
+|---|---|
+| `simple` (default) | considered started as soon as `ExecStart=` is forked |
+| `exec` | like `simple`, but waits until the process is actually `exec()`'d |
+| `forking` | considered started once the main process forks itself into the background (`PIDFile=` reports the real PID) |
+| `oneshot` | considered started once the process exits; `RemainAfterExit=yes` keeps it showing "active" |
+| `notify` | the process itself tells systemd it's ready via a `READY=1` message |
+
+## 2.10 — `Wants=`/`Requires=` vs `After=`/`Before=`
+
+`Wants=`/`Requires=` = "is this needed" (presence/absence, starts it automatically). `After=`/`Before=` = "in what order" (timing only, never starts anything). They're independent of each other — usually written together (`Wants=X` + `After=X`).
+
+Trap: `network.target` does NOT mean "network is ready", only that "network infrastructure has been triggered". A real "network ready" guarantee needs `network-online.target` + `Wants=network-online.target` (a common gotcha on AWS/cloud-init boxes).
+
+```
+$ systemctl cat ssh
+...
+After=network.target auditd.service
+```
+
+(Only `After` is present, no `Wants`/`Requires` — ssh assumes `network.target` is already started from somewhere else, it doesn't start it itself.)
+
+```
+$ cat /usr/lib/systemd/system/basic.target
+[Unit]
+Description=Basic System
+Documentation=man:systemd.special(7)
+Requires=sysinit.target
+Wants=sockets.target timers.target paths.target slices.target
+After=sysinit.target sockets.target paths.target slices.target tmp.mount
+RequiresMountsFor=/var /var/tmp
+Wants=tmp.mount
+```
+
+`Requires=sysinit.target` + `After=sysinit.target` together — proof of the "pairing" pattern. `/var`, `/var/tmp` are MANDATORY (`RequiresMountsFor=`), `/tmp` is only SOFT (`Wants=tmp.mount`) because `tmp.mount` might be masked, and that shouldn't count as an error.
+
+`logger-demo`'s own (implicit) dependencies:
+
+```
+$ systemctl show logger-demo -p After,Wants,Requires,WantedBy
+Requires=sysinit.target system.slice
+Wants=
+WantedBy=
+After=basic.target systemd-journald.socket sysinit.target system.slice
+```
+
+We wrote nothing in `[Unit]`, yet `Requires=`/`After=` are populated — `DefaultDependencies=yes` (the default, we never turned it off) is systemd automatically adding implicit dependencies (`systemctl show logger-demo -p DefaultDependencies` → `yes`).
+
+`WantedBy=` comes back empty — even though `[Install]` says `WantedBy=multi-user.target` — because that only becomes a REAL link once the unit is `enable`d (the symlink exists); while disabled it's empty. `[Install]` is an "intent" written in the file, not an actual link.
+
+## 2.11 — The `-` prefix: swallowing errors (`EnvironmentFile=-...`)
+
+The `-` prefix means "ignore it if this file/command fails or doesn't exist". `EnvironmentFile=-/etc/x` lets the service start even if the file is missing — that was exactly the fix in step 9 of the case study. The same pattern is in the cron unit: `EnvironmentFile=-/etc/default/cron` (see 2.7).
+
+```
+$ systemctl show logger-demo -p EnvironmentFile
+(empty — wrong property name, silently returns nothing, no error)
+$ systemctl show logger-demo -p EnvironmentFiles
+EnvironmentFiles=/etc/logger-demo-env-yok (ignore_errors=yes)
+```
+
+The correct/real property name is PLURAL: `EnvironmentFiles`. The `-` prefix turns into the `ignore_errors=yes` flag.
+
+Full-loop verification — a real env file plus a drop-in `Environment=` were tested together:
+
+```
+$ echo 'REAL_VAR=merhaba' | sudo tee /etc/logger-demo-env-yok
+$ journalctl -u logger-demo -n 3
+... heartbeat #0 - DEMO_VAR=hello REAL_VAR=merhaba
+```
+
+Both (`Environment=` from the drop-in, `EnvironmentFile=` from the real file) were correctly injected into the process.
+
+## 2.12 — cgroups: `systemd-cgls`, `stop` vs. a bare `kill`, SIGTERM vs. SIGKILL
+
+systemd runs every service in its own cgroup; `stop` kills the ENTIRE cgroup, not just the Main PID — child processes (like `sleep`) aren't left orphaned.
+
+```
+$ systemd-cgls /system.slice/logger-demo.service
+CGroup /system.slice/logger-demo.service:
+├─3346 /bin/bash /usr/local/bin/logger-demo.sh
+└─3379 sleep 5
+```
+
+Live test — killing the main PID with a bare `kill` (not `systemctl stop`):
+
+```
+$ sudo kill 3346        # SIGTERM, default
+→ Active: inactive (dead), "Deactivated successfully" — RESTART NOT TRIGGERED
+```
+
+Why (`man 5 systemd.service`, the `Restart=on-failure` definition): "is terminated by a signal (excluding SIGHUP, SIGINT, SIGTERM, SIGPIPE)". `SIGTERM` is deliberately treated as a "clean shutdown", because systemd's own `stop` command also uses `SIGTERM` — a bare `kill` is treated the same as `systemctl stop`.
+
+```
+$ sudo kill -9 <PID>    # SIGKILL, not on the exclusion list
+Sep 26 15:28:08 lev-k systemd[1]: logger-demo.service: Scheduled restart job, restart counter is at 1.
+Sep 26 15:28:08 lev-k systemd[1]: Started logger-demo.service - Demo heartbeat logger v2.
+→ RESTART TRIGGERED, new PID, heartbeat starting again from #0.
+```
+
+| Signal | Does `Restart=on-failure` trigger |
+|---|---|
+| `SIGTERM`, `SIGINT`, `SIGHUP`, `SIGPIPE` | no — counts as a clean shutdown |
+| `SIGKILL` and every other signal | yes |
+
+Note: same source (`man 7 signal`) as the `kill -9 1` correction in 2.1 — SIGKILL is the one signal that can never have a handler installed, and kills any process directly except PID 1.
+
+## 2.13 — `systemctl cat`: viewing a unit + its drop-ins together
+
+Prints the unit plus all of its drop-ins concatenated into their combined/effective form, with the source file paths shown as comments (it's just concatenation — it doesn't make the override decision itself).
+
+```
+$ systemctl cat ssh
+# /usr/lib/systemd/system/ssh.service
+[Unit]
+Description=OpenBSD Secure Shell server
+Documentation=man:sshd(8) man:sshd_config(5)
+After=network.target auditd.service
+ConditionPathExists=!/etc/ssh/sshd_not_to_be_run
+
+[Service]
+EnvironmentFile=-/etc/default/ssh
+ExecStartPre=/usr/sbin/sshd -t
+ExecStart=/usr/sbin/sshd -D $SSHD_OPTS
+ExecReload=/usr/sbin/sshd -t
+ExecReload=/bin/kill -HUP $MAINPID
+KillMode=process
+Restart=on-failure
+RestartPreventExitStatus=255
+Type=notify
+RuntimeDirectory=sshd
+RuntimeDirectoryMode=0755
+
+[Install]
+WantedBy=multi-user.target
+Alias=sshd.service
+
+# /usr/lib/systemd/system/ssh.service.d/ec2-instance-connect.conf
+[Service]
+ExecStart=
+ExecStart=/usr/sbin/sshd -D -o "AuthorizedKeysCommand /usr/share/ec2-instance-connect/eic_run_authorized_keys %%u %%f" -o "AuthorizedKeysCommandUser ec2-instance-connect" $SSHD_OPTS
+```
+
+Important detail: `ExecStart=` appears TWICE in the drop-in — first EMPTY (= "reset everything accumulated so far"), then the new value. Some directives like `ExecStart=` are normally "cumulative" — without the empty line, both would try to run stacked on top of each other. This is the official technique AWS's EC2 Instance Connect package uses to COMPLETELY REPLACE the original `sshd` command.
+
+| | `logger-demo.service` | `ssh.service` |
+|---|---|---|
+| Main file | `/etc/systemd/system/` — we wrote it by hand | `/usr/lib/systemd/system/` — installed by a package |
+| Override/drop-in | `/etc/systemd/system/logger-demo.service.d/` (see 2.14) | `/usr/lib/systemd/system/ssh.service.d/` (installed by the `ec2-instance-connect` package) |
+
+General rule: `/usr/lib/` = the vendor/package layer (`apt upgrade` can overwrite it), `/etc/` = the admin layer (apt never touches it, your overrides always live here). If a unit of the same name exists in both, `/etc/` wins.
+
+## 2.14 — Drop-in files and `systemctl edit`
+
+The official way to override a unit's behavior without editing the unit file itself.
+
+```
+$ sudo systemctl edit logger-demo
+→ opens an editor, Environment=DEMO_VAR=hello was added under [Service], saved.
+"Successfully installed edited file '/etc/systemd/system/logger-demo.service.d/override.conf'."
+```
+
+(It triggers its own `daemon-reload` — no need to do it by hand, unlike `sudo tee`.)
+
+```
+$ cat /etc/systemd/system/logger-demo.service.d/override.conf
+[Service]
+Environment=DEMO_VAR=hello
+$ systemctl show logger-demo -p Environment
+Environment=DEMO_VAR=hello
+```
+
+Verified in full during the 2.11 full-loop test — `journalctl` showed both `Environment=` and `EnvironmentFile=` were genuinely injected into the process.
+
+## 2.15 — `mask`/`unmask`
+
+`mask` is stronger than `disable`; it drops a `/dev/null` symlink at `/etc/systemd/system/<unit>` — even a manual `start` becomes impossible. `unmask` removes the symlink and restores the previous state.
+
+Trap: `logger-demo`'s REAL file already lives in `/etc/`, so masking it directly failed:
+
+```
+$ sudo systemctl mask logger-demo
+Failed to mask unit: File /etc/systemd/system/logger-demo.service already exists.
+```
+
+(`logger-demo` was left untouched — `--force` doesn't change this either: per `man systemctl`, `--force` is mainly for resolving symlink conflicts in `enable`/`link`/`unmask`, it doesn't overwrite a real file for `mask`.)
+
+Tested with a separate dummy (`mask-test.service`), moved into `/usr/lib/systemd/system/` (simulating a package install) for a realistic scenario:
+
+```
+$ sudo systemctl mask mask-test
+Created symlink /etc/systemd/system/mask-test.service → /dev/null.
+$ sudo systemctl start mask-test
+Failed to start mask-test.service: Unit mask-test.service is masked.
+```
+
+(With `disable`, a manual `start` would still work — with `mask` it doesn't; that's the real difference.)
+
+```
+$ sudo systemctl unmask mask-test
+Removed "/etc/systemd/system/mask-test.service".
+$ sudo systemctl start mask-test
+$ systemctl status mask-test
+○ mask-test.service - Mask test dummy
+     Loaded: loaded (/usr/lib/systemd/system/mask-test.service; static)
+     Active: inactive (dead)
+```
+
+(The original in `/usr/lib/` was found automatically — it ran successfully, content was never lost.)
+
+Note: `static` enablement state — units with no `[Install]` section show up this way; they can't be `enable`d/`disable`d, only started manually or via a dependency.
+
+## 2.16 — `is-enabled` / `is-active` / `is-failed`
+
+```
+$ systemctl is-enabled logger-demo
+disabled
+$ systemctl is-active logger-demo
+active
+$ systemctl is-failed logger-demo
+active
+```
+
+Watch out: `is-failed` actually just prints `ActiveState` too — there's no separate word for "not failed", only the EXIT CODE differs (0 = actually failed, non-zero otherwise). In scripts, check `$?`, not the printed word. All three are automation/script-friendly: a single word plus a meaningful exit code.
+
+## 2.17 — `list-unit-files` / `list-dependencies` / `list-units`
+
+```
+$ systemctl list-unit-files | grep logger-demo
+logger-demo.service                            disabled        enabled
+```
+
+Two columns: STATE (the real, current state — this drives boot behavior) vs. VENDOR PRESET (a SUGGESTION coming from `/usr/lib/systemd/system-preset/*.preset` files, with no enforcing effect at all — only applied via the `systemctl preset` command).
+
+```
+$ systemctl list-dependencies logger-demo
+logger-demo.service
+● ├─system.slice
+● └─sysinit.target
+●   ├─apparmor.service
+●   ├─blk-availability.service
+    ...
+●   ├─local-fs.target
+●   │ ├─-.mount
+●   │ ├─boot-efi.mount
+```
+
+Symbols: `●` = active/running, `○` = inactive (some units are `oneshot`, so having run once at boot and stopped is normal). `list-dependencies` is recursive by default — targets also expand their own dependencies (like mounts under `local-fs.target`).
+
 ## Relationship to Kubernetes
 
 - On a Kubernetes node, `kubelet` is just an ordinary systemd-managed service on the host; `systemctl status kubelet` / `journalctl -u kubelet -f` work exactly the way we learned here.
@@ -509,6 +897,9 @@ Process:
 - `start` and `enable` are independent: `start` runs it now, `enable` makes it run at boot. Doing one doesn't do the other.
 - The contents of `.wants`/`.requires` directories are always symlinks; the unit file itself lives in `/etc/systemd/system/` or `/usr/lib/systemd/system/`.
 - The reboot test showed process state isn't preserved (new PID); the only thing that persists is the enabled state (whether the symlink exists).
+- `daemon-reload` only refreshes metadata, it never restarts a process — an `ExecStart=` change needs an explicit `restart` on top to take effect.
+- `systemctl show -p <property>` asks for the REAL property name exposed over D-Bus, which may not match the directive name in the unit file 1:1 (e.g. the `EnvironmentFile=` directive maps to the `EnvironmentFiles` property, plural). A wrong/unknown property name silently returns nothing, no error.
+- `mask` fails if a real file already exists at `/etc/systemd/system/` (`--force` doesn't change this); the real difference between `disable` and `mask` is whether a manual `start` still works.
 
 [↑ Go back to TOC](#table-of-contents)
 
