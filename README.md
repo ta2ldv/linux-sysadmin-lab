@@ -36,8 +36,8 @@ The longer-term goal behind this lab is virtualization and Kubernetes. Almost ev
 | 2 | [systemd & systemctl](#part-2--systemd--systemctl) | How does systemd control every program on the machine? | ✅ |
 | 3 | [Logging & journalctl](#part-3--logging--journalctl) | Where do logs live, and how do I interrogate the journal? | ✅ |
 | 4 | [Users & groups](#part-4--users--groups) | How do I create, restrict and destroy users — and what is a group really? | ✅ |
-| 5 | [Package management (apt)](#part-5--package-management-apt) | What actually happens on `apt install` — repos, GPG keys, binaries? | 🔜 |
-| 6 | [Process management](#part-6--process-management) | What is a process, a signal — and what really separates SIGTERM from SIGKILL? | 🔜 |
+| 5 | [Process management](#part-5--process-management) | What is a process, a signal — and what really separates SIGTERM from SIGKILL? | 🔜 |
+| 6 | [Package management (apt)](#part-6--package-management-apt) | What actually happens on `apt install` — repos, GPG keys, binaries? | 🔜 |
 | 7 | [SSH & sshd](#part-7--ssh--sshd) | How do I set up and harden sshd, and manage keys properly? | 🔜 |
 | 8 | [Networking basics](#part-8--networking-basics) | How does the machine talk — interfaces, DNS, firewall, namespaces? | 🔜 |
 | 9 | [File permissions & ownership](#part-9--file-permissions--ownership) | Who may touch what — chmod, umask, setuid, ACL? | 🔜 |
@@ -1285,17 +1285,17 @@ Right order: **`find -uid` → delete/`chown` → `deluser`**.
 
 ---
 
-# Part 5 — Package management (apt)
+# Part 5 — Process management
 
-> 🔜 Placeholder — how apt works: repositories, sources lists, GPG keys, installing binaries, updates.
+> 🔜 Placeholder — ps, top/htop, signals (SIGTERM vs SIGKILL), nice/renice.
 
 [↑ Go back to TOC](#table-of-contents)
 
 ---
 
-# Part 6 — Process management
+# Part 6 — Package management (apt)
 
-> 🔜 Placeholder — ps, top/htop, signals (SIGTERM vs SIGKILL), nice/renice.
+> 🔜 Placeholder — how apt works: repositories, sources lists, GPG keys, installing binaries, updates.
 
 [↑ Go back to TOC](#table-of-contents)
 

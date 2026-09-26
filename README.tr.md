@@ -36,8 +36,8 @@ Bu lab'ın uzun vadeli hedefi virtualization ve Kubernetes. Buradaki hemen her b
 | 2 | [systemd & systemctl](#bölüm-2--systemd--systemctl) | systemd makinedeki her programı nasıl kontrol ediyor? | ✅ |
 | 3 | [Logging & journalctl](#bölüm-3--logging--journalctl) | Log'lar nerede yaşıyor, journal nasıl sorgulanır? | ✅ |
 | 4 | [Users & groups](#bölüm-4--users--groups) | User nasıl yaratılır, kısıtlanır, yok edilir — group gerçekte nedir? | ✅ |
-| 5 | [Package management (apt)](#bölüm-5--package-management-apt) | `apt install` deyince gerçekte ne oluyor — repo'lar, GPG key'ler, binary'ler? | 🔜 |
-| 6 | [Process management](#bölüm-6--process-management) | Process nedir, signal nedir — SIGTERM ile SIGKILL'i gerçekte ne ayırır? | 🔜 |
+| 5 | [Process management](#bölüm-5--process-management) | Process nedir, signal nedir — SIGTERM ile SIGKILL'i gerçekte ne ayırır? | 🔜 |
+| 6 | [Package management (apt)](#bölüm-6--package-management-apt) | `apt install` deyince gerçekte ne oluyor — repo'lar, GPG key'ler, binary'ler? | 🔜 |
 | 7 | [SSH & sshd](#bölüm-7--ssh--sshd) | sshd nasıl kurulur ve hardening yapılır, key'ler nasıl yönetilir? | 🔜 |
 | 8 | [Networking temelleri](#bölüm-8--networking-temelleri) | Makine nasıl konuşuyor — interface'ler, DNS, firewall, namespace'ler? | 🔜 |
 | 9 | [File permissions & ownership](#bölüm-9--file-permissions--ownership) | Kim neye dokunabilir — chmod, umask, setuid, ACL? | 🔜 |
@@ -1285,17 +1285,17 @@ Doğru sıra: **`find -uid` → sil/`chown` → `deluser`**.
 
 ---
 
-# Bölüm 5 — Package management (apt)
+# Bölüm 5 — Process management
 
-> 🔜 Placeholder — apt nasıl çalışır: repository'ler, sources list, GPG key'ler, binary kurulumu, update.
+> 🔜 Placeholder — ps, top/htop, signal'lar (SIGTERM vs SIGKILL), nice/renice.
 
 [↑ İçindekilere dön](#i̇çindekiler)
 
 ---
 
-# Bölüm 6 — Process management
+# Bölüm 6 — Package management (apt)
 
-> 🔜 Placeholder — ps, top/htop, signal'lar (SIGTERM vs SIGKILL), nice/renice.
+> 🔜 Placeholder — apt nasıl çalışır: repository'ler, sources list, GPG key'ler, binary kurulumu, update.
 
 [↑ İçindekilere dön](#i̇çindekiler)
 
